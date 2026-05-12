@@ -1,0 +1,9 @@
+# packages 目录下的所有内容（二进制包、镜像等），不提交到仓库
+packages/*
+!packages/.gitkeep
+
+# release 目录（发布包）
+release/
+
+# 壁仞 PDF 文档（大文件）
+*.pdf
