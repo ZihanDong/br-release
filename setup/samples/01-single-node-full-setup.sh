@@ -5,7 +5,7 @@
 #   - k8s 环境安装
 #   - 控制面初始化
 #   - 节点切换为 BirenTech GPU 算力节点
-#   - 私有 Registry 部署与镜像推送
+#   - 私有 Registry 部署（镜像导入请在完成后执行 update_images.sh add）
 #
 # 适用场景：开发机、单机测试环境、单节点 GPU 集群
 #
@@ -66,5 +66,6 @@ _info "  节点状态: $(kubectl get nodes --no-headers 2>/dev/null | head -1)"
 if [[ "${DEPLOY_REGISTRY}" == "true" ]]; then
     REG_ADDR=$(grep TRUST_REGISTRY_ADDR "${K8S_DIR}/registry/registry-trust.conf" 2>/dev/null | cut -d= -f2 || true)
     [[ -n "${REG_ADDR}" ]] && _info "  Registry : http://${REG_ADDR}/v2/_catalog"
+    _info "  下一步：编辑 registry/images.conf 后运行: sudo bash registry/update_images.sh add"
 fi
 _info "  GPU 资源: $(kubectl get node "$(hostname -s)" -o jsonpath='{.status.allocatable.birentech\.com/gpu}' 2>/dev/null || echo 'N/A')"

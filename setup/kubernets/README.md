@@ -21,9 +21,11 @@ setup/kubernets/
 │   └── init_cluster.sh
 └── registry/           # 私有 Registry 管理
     ├── setup-registry.sh   # 在 k8s 中部署私有 Registry
+    ├── update_images.sh    # 镜像同步：比对 images.conf 与 Registry，支持 add/purge/conf_gen
     ├── registry-trust.sh   # 节点注入/移除 Registry 信任配置
     ├── registry_clean.sh   # 清除 Registry 全部资源和数据
-    └── registry.conf       # Registry 部署配置（存储路径、端口、镜像命名空间）
+    ├── registry.conf       # Registry 部署配置（存储路径、端口等）
+    └── images.conf         # 镜像路径配置（命名空间定义，供 update_images.sh 使用）
 ```
 
 ---
@@ -42,10 +44,13 @@ sudo ./master.sh
 # 3. 将本机同时作为 BirenTech GPU 算力节点
 sudo ./set-node-mode.sh biren
 
-# 4. 部署私有 Registry 并推送镜像
+# 4. 部署私有 Registry
 sudo ./registry/setup-registry.sh
 
-# 5. 向其他节点下发 Registry 信任配置
+# 5. 导入并推送镜像（编辑 registry/images.conf 后执行）
+sudo ./registry/update_images.sh add
+
+# 6. 向其他节点下发 Registry 信任配置
 sudo ./registry/registry-trust.sh apply worker01,worker02
 ```
 
@@ -256,7 +261,7 @@ sudo ./k8s_clean.sh
 
 ### registry/setup-registry.sh — 部署私有 Registry
 
-在 k8s 集群中部署 `registry:2` 镜像仓库（NodePort 方式），按命名空间批量导入并推送镜像，生成信任配置文件。
+在 k8s 集群中部署 `registry:2` 镜像仓库（NodePort 方式），配置本机信任并生成信任配置文件。
 
 **前提：** 集群已就绪（`master.sh` 执行完成）
 
@@ -274,27 +279,81 @@ REGISTRY_STORAGE=/data/registry     # 镜像存储目录
 REGISTRY_PORT=32000                  # NodePort 端口
 REGISTRY_HTTP=true                   # HTTP 模式（内网推荐）
 REGISTRY_K8S_NAMESPACE=kube-system   # 部署命名空间
-
-[namespace.base]                     # 基础镜像命名空间
-/path/to/images/base-image.tar
-
-[namespace.infer]                    # 推理镜像命名空间
-/path/to/images/                     # 目录：递归扫描所有 .tar/.tar.gz
-
-[namespace.k8s]
-/path/to/k8s/plugin.tar.gz
 ```
 
 **执行流程：**
 1. 拉取 `registry:2` 镜像（已存在则跳过）
 2. 准备存储目录
-3. 在 k8s 中部署 Deployment + NodePort Service
+3. 在 k8s 中部署 Deployment + NodePort Service（自动启用 `REGISTRY_STORAGE_DELETE_ENABLED=true`）
 4. 等待 Registry 就绪
-5. 配置本机 containerd 信任该 Registry
-6. 按命名空间导入并推送镜像（地址格式：`<ip>:<port>/<namespace>/<image>:<tag>`）
-7. 生成 `registry-trust.conf` 信任配置文件
+5. 配置本机 containerd 信任该 Registry，生成 `registry-trust.conf`
 
-**推送后访问：**
+镜像导入和推送请使用 `update_images.sh`（见下节）。
+
+---
+
+### registry/update_images.sh — 镜像同步管理
+
+比对 `images.conf` 中定义的镜像与 Registry 现有镜像，支持三种同步模式。添加/删除操作均需用户确认。
+
+**用法：**
+
+```bash
+sudo ./registry/update_images.sh [add|purge|conf_gen] [选项]
+```
+
+**三种模式：**
+
+| 模式 | 说明 |
+|------|------|
+| `add`（默认） | 找出 images.conf 中有但 Registry 中缺失的镜像，确认后导入并推送 |
+| `purge` | 找出 Registry 中有但 images.conf 未定义的多余镜像，确认后删除并运行 GC |
+| `conf_gen` | 根据 Registry 当前镜像生成快照配置文件（不覆盖原有文件） |
+
+**选项：**
+
+| 选项 | 默认值 | 说明 |
+|------|--------|------|
+| `--config FILE` | `./registry.conf` | Registry 部署配置文件 |
+| `--images FILE` | `./images.conf` | 镜像路径配置文件 |
+| `--registry ADDR` | 自动检测 | 手动指定 Registry 地址（如 `192.168.1.10:32000`） |
+
+**镜像配置文件（images.conf）格式：**
+
+```ini
+# 每个 [namespace.<name>] 节定义一个命名空间，节内每行为路径（文件或目录）
+[namespace.base]
+/data/release/images/base-image.tar
+
+[namespace.infer]
+/data/release/images/             # 目录：递归扫描所有 .tar/.tar.gz
+
+[namespace.k8s]
+/data/release/k8s/plugin.tar.gz
+```
+
+**用法示例：**
+
+```bash
+# 添加缺失镜像（会打印 diff 并请求确认）
+sudo ./registry/update_images.sh add
+
+# 删除多余镜像并运行 GC（会打印 diff 并请求确认）
+sudo ./registry/update_images.sh purge
+
+# 生成当前 Registry 镜像快照（不修改任何文件）
+sudo ./registry/update_images.sh conf_gen
+
+# 手动指定 Registry 地址
+sudo ./registry/update_images.sh add --registry 192.168.1.10:32000
+```
+
+**Registry 地址解析优先级：**
+1. `--registry` 命令行参数
+2. `registry-trust.conf`（由 `setup-registry.sh` 生成）
+3. 集群 API Server 自动检测
+
+**镜像访问格式：**`<registry-addr>/<namespace>/<image>:<tag>`
 
 ```bash
 # 查看所有仓库
@@ -304,7 +363,7 @@ curl http://<master-ip>:32000/v2/_catalog
 curl http://<master-ip>:32000/v2/<namespace>/<image>/tags/list
 
 # 在 Pod 中使用
-image: 10.49.4.248:32000/infer/birensupa-smartinfer-vllm:26.04.beta1-py310-pt2.8.0-br1xx
+image: <master-ip>:32000/infer/birensupa-smartinfer-vllm:26.04.beta1-py310-pt2.8.0-br1xx
 ```
 
 ---
@@ -395,6 +454,10 @@ sudo ./set-node-mode.sh biren
 # 部署私有 Registry
 sudo ./registry/setup-registry.sh
 
+# 编辑 images.conf 后导入镜像
+# vi ./registry/images.conf
+sudo ./registry/update_images.sh add
+
 # 验证
 kubectl get nodes -o wide
 kubectl get pods -A
@@ -415,8 +478,10 @@ scp /root/k8s-join.sh worker01:/root/k8s-join.sh
 sudo ./install.sh
 sudo ./join.sh biren                  # 以 GPU 节点加入
 
-# === 在 Master 节点执行（向 Worker 分发 Registry 信任）===
+# === 在 Master 节点执行（部署 Registry，推送镜像，分发信任）===
 sudo ./registry/setup-registry.sh
+# vi ./registry/images.conf
+sudo ./registry/update_images.sh add
 sudo ./registry/registry-trust.sh apply worker01,worker02
 ```
 

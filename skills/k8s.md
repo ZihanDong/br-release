@@ -11,6 +11,7 @@ metadata:
     - setup/kubernets/set-node-mode.sh
     - setup/kubernets/k8s_clean.sh
     - setup/kubernets/registry/setup-registry.sh
+    - setup/kubernets/registry/update_images.sh
     - setup/kubernets/registry/registry-trust.sh
     - setup/kubernets/registry/registry_clean.sh
 ---
@@ -26,7 +27,8 @@ metadata:
 | `join.sh <mode>` | yes | Join a node to an existing cluster as cpu / biren / worker |
 | `set-node-mode.sh <mode>` | yes | Switch an already-joined node between cpu / biren / none |
 | `k8s_clean.sh` | yes | Reset system to pre-k8s state; prompts before executing |
-| `registry/setup-registry.sh` | yes | Deploy registry:2 in k8s + push images by namespace |
+| `registry/setup-registry.sh` | yes | Deploy registry:2 in k8s; writes registry-trust.conf |
+| `registry/update_images.sh` | yes | Sync images between images.conf and registry (add/purge/conf_gen) |
 | `registry/registry-trust.sh <sub>` | yes (apply/remove) | Inject or remove containerd trust on local or remote nodes |
 | `registry/registry_clean.sh` | yes | Remove all registry resources and data; prompts before executing |
 
@@ -193,23 +195,29 @@ sudo bash setup/kubernets/registry/setup-registry.sh /path/to/registry.conf
 **What it does:**
 1. Pulls `registry:2` into containerd `k8s.io` namespace (skips if already present)
 2. Creates storage directory
-3. Deploys k8s Deployment + NodePort Service on the control-plane node
+3. Deploys k8s Deployment + NodePort Service on the control-plane node (`REGISTRY_STORAGE_DELETE_ENABLED=true` is set automatically)
 4. Waits for registry HTTP endpoint to become reachable
-5. Configures local containerd trust (`certs.d`)
-6. Imports and pushes all images by namespace as defined in `registry.conf`
-7. Writes `registry-trust.conf` for distribution to other nodes
+5. Configures local containerd trust (`certs.d`) and writes `registry-trust.conf`
 
 **Prerequisites:** cluster must be running (`master.sh` completed).
 
-### 3.2 Configuration file (registry.conf)
+To import/push images after the registry is running, use `update_images.sh`.
+
+### 3.2 Configuration files
+
+**registry.conf** — registry infrastructure settings (read by `setup-registry.sh`):
 
 ```ini
 REGISTRY_STORAGE=/data/registry      # image data directory on the host
 REGISTRY_PORT=32000                   # NodePort
 REGISTRY_HTTP=true                    # HTTP (recommended for internal networks)
 REGISTRY_K8S_NAMESPACE=kube-system   # k8s namespace for registry resources
+```
 
-# Image namespaces — each section defines one namespace.
+**images.conf** — image source definitions (read by `update_images.sh`):
+
+```ini
+# Each [namespace.<name>] section defines one namespace.
 # Paths can be files (.tar, .tar.gz) or directories (scanned recursively).
 # Pushed image address: <registry-addr>/<namespace>/<image-basename>:<tag>
 
@@ -222,6 +230,27 @@ REGISTRY_K8S_NAMESPACE=kube-system   # k8s namespace for registry resources
 [namespace.k8s]
 /path/to/plugin.tar.gz
 ```
+
+### 3.2b Image sync (update_images.sh)
+
+```bash
+# Add missing images (default mode)
+sudo bash setup/kubernets/registry/update_images.sh add
+
+# Delete registry images not in images.conf
+sudo bash setup/kubernets/registry/update_images.sh purge
+
+# Generate a snapshot config of current registry contents
+sudo bash setup/kubernets/registry/update_images.sh conf_gen
+
+# Options
+sudo bash setup/kubernets/registry/update_images.sh add \
+  --config /path/to/registry.conf \
+  --images /path/to/images.conf \
+  --registry 192.168.1.10:32000
+```
+
+Both `add` and `purge` print a diff and prompt for confirmation before making changes. `conf_gen` writes `images.conf.generated-<timestamp>` and never overwrites existing files.
 
 ### 3.3 Distribute trust to nodes
 

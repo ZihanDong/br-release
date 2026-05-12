@@ -7,3 +7,6 @@ release/
 
 # 壁仞 PDF 文档（大文件）
 *.pdf
+
+# update_images.sh 生成的快照文件
+setup/kubernets/registry/images.conf.generated-*
