@@ -1,6 +1,8 @@
 # packages 目录下的所有内容（二进制包、镜像等），不提交到仓库
 packages/*
 !packages/.gitkeep
+!packages/download_release.sh
+!packages/README.md
 
 # release 目录（发布包）
 release/
