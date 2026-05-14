@@ -7,6 +7,7 @@ This directory contains skill files for use by Claude Code agents. Each skill is
 | Skill | File | Description |
 |-------|------|-------------|
 | `k8s` | [k8s.md](k8s.md) | All k8s operations: cluster setup, node modes, private registry, cleanup |
+| `vllm` | [vllm.md](vllm.md) | Launch vLLM inference servers (Docker + k8s) on BirenTech GPU nodes |
 
 ## How to Use in an Agent
 
@@ -30,4 +31,8 @@ The skill file provides:
 | `setup/kubernets/` | Main k8s scripts root |
 | `setup/kubernets/registry/` | Registry management scripts |
 | `setup/samples/` | End-to-end demo scripts (01–04) |
-| `setup/kubernets/README.md` | Full Chinese documentation |
+| `setup/kubernets/README.md` | Full Chinese k8s documentation |
+| `infer/llm/vllm/` | vLLM server scripts root |
+| `infer/llm/vllm/configs/` | Per-model vLLM run configs |
+| `infer/llm/vllm/k8s/` | k8s Deployment + Service YAMLs |
+| `infer/llm/vllm/README.md` | Full Chinese vLLM documentation |

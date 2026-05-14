@@ -1,0 +1,170 @@
+# vLLM server — Qwen/Qwen3-32B (chat completion)
+#
+# GPU:        2 × Biren166M  (tensor_parallel_size=2)
+# Port:       28800 (container) → NodePort 30801
+# Access:     http://<node-ip>:30801/v1/chat/completions
+#
+# Deploy:     kubectl apply -f qwen3-32b.yaml
+# Remove:     kubectl delete -f qwen3-32b.yaml
+# Logs:       kubectl logs -n vllm -l app=vllm-qwen3-32b -f
+# Curl test:
+#   curl -s http://10.49.4.248:30801/v1/chat/completions \
+#     -H 'Content-Type: application/json' \
+#     -d '{"model": "Qwen/Qwen3-32B", "messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 64}' \
+#     | python3 -m json.tool
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vllm
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen3-32b
+  namespace: vllm
+  labels:
+    app: vllm-qwen3-32b
+    model: qwen3-32b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-qwen3-32b
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen3-32b
+        model: qwen3-32b
+    spec:
+      # Use biren-container-runtime to inject BIREN_VISIBLE_DEVICES and SDK library paths
+      runtimeClassName: biren
+      # Pin to the node that holds the model weights and BirenTech driver
+      nodeName: pj-3f-server008
+
+      containers:
+      - name: vllm-server
+        image: 10.49.4.248:32000/infer/birensupa-smartinfer-vllm:26.04.beta1-py310-pt2.8.0-br1xx
+        imagePullPolicy: IfNotPresent
+
+        # No `command` override — let the image entrypoint (biren_entrypoint.sh) run first.
+        # The entrypoint sets LD_LIBRARY_PATH for the BirenTech SDK, then exec's "$@".
+        args:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+        - --host
+        - "0.0.0.0"
+        - --port
+        - "28800"
+        - --model
+        - /data/models/Qwen/Qwen3-32B
+        - --served_model_name
+        - Qwen/Qwen3-32B
+        - --trust_remote_code
+        - --dtype
+        - auto
+        - --kv_cache_dtype
+        - auto
+        - --max_model_len
+        - "32768"
+        - --max_num_seqs
+        - "64"
+        - --tensor_parallel_size
+        - "2"
+        - --pipeline_parallel_size
+        - "1"
+        - --data_parallel_size
+        - "1"
+        - --gpu_memory_utilization
+        - "0.8"
+        - --distributed_executor_backend
+        - mp
+        - --enable_chunked_prefill
+        - --compilation_config
+        - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+
+        env:
+        - name: VLLM_USE_V1
+          value: "1"
+        - name: VLLM_WORKER_MULTIPROC_METHOD
+          value: spawn
+        - name: VLLM_BR_WEIGHT_TYPE
+          value: NUMA
+
+        ports:
+        - name: http
+          containerPort: 28800
+          protocol: TCP
+
+        resources:
+          requests:
+            birentech.com/gpu: "2"
+            cpu: "16"
+            memory: "64Gi"
+          limits:
+            birentech.com/gpu: "2"
+            cpu: "32"
+            memory: "160Gi"
+
+        securityContext:
+          capabilities:
+            add:
+            - IPC_LOCK
+
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 28800
+          initialDelaySeconds: 240
+          periodSeconds: 15
+          failureThreshold: 8
+          timeoutSeconds: 10
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 28800
+          initialDelaySeconds: 360
+          periodSeconds: 30
+          failureThreshold: 3
+          timeoutSeconds: 10
+
+        volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: model-weights
+          mountPath: /data/models
+          readOnly: true
+
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Gi
+      - name: model-weights
+        hostPath:
+          path: /data/models
+          type: Directory
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen3-32b
+  namespace: vllm
+  labels:
+    app: vllm-qwen3-32b
+    model: qwen3-32b
+spec:
+  type: NodePort
+  selector:
+    app: vllm-qwen3-32b
+  ports:
+  - name: http
+    port: 28800
+    targetPort: 28800
+    nodePort: 30801
+    protocol: TCP
