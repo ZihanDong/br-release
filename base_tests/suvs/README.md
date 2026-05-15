@@ -12,7 +12,6 @@ suvs（Supa Validation Suite）是壁仞 GPU 的硬件测试工具，支持 PCIe
 |------|------|
 | `setup_suvs.sh` | 构建 Docker 测试容器，安装 sudcgm（含 suvs 二进制） |
 | `run_suvs.sh` | 在容器内执行测试，生成并保存 conf 文件，记录日志和摘要 |
-| `SUVS_TEST.md` | 官方测试命令手册与参数说明 |
 
 ---
 
