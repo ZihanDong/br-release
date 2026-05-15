@@ -5,7 +5,7 @@
 # LD_LIBRARY_PATH for the BirenTech SDK before this script is called.
 #
 # Usage:
-#   bash start_vllm_server.sh <config_file>
+#   bash vllm_server.sh <config_file>
 #
 # config_file may be:
 #   - a bare model name: bge-m3  (resolved to configs/bge-m3.conf)

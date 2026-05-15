@@ -5,9 +5,10 @@ metadata:
   type: skill
   tags: [vllm, inference, birentech, gpu, docker, kubernetes, llm, embedding]
   scripts:
-    - infer/llm/vllm/start_vllm_server.sh
-    - infer/llm/vllm/start_vllm_docker.sh
-    - infer/llm/vllm/start_vllm_k8s.sh
+    - infer/llm/vllm/vllm_server.sh
+    - infer/llm/vllm/run_docker.sh
+    - infer/llm/vllm/k8s_yaml_gen.sh
+    - infer/llm/vllm/test_k8s.sh
     - infer/llm/vllm/model_registry.conf
     - infer/llm/vllm/configs/bge-m3.conf
     - infer/llm/vllm/configs/qwen3-32b.conf
@@ -19,16 +20,18 @@ metadata:
 
 | 文件 | 运行位置 | 说明 |
 |------|---------|------|
-| `start_vllm_server.sh` | **容器内** | 加载 conf → 查 registry → exec vLLM；被 Docker/k8s 外层脚本统一调用 |
-| `start_vllm_docker.sh` | 宿主机 | GPU 选择（brsmi）+ `docker run` + 挂载脚本目录 + 健康轮询 |
-| `start_vllm_k8s.sh` | 宿主机 | 节点探测 + 动态生成 YAML（Namespace+Deployment+Service）+ 等待 Pod Ready |
+| `vllm_server.sh` | **容器内** | 加载 conf → 查 registry → exec vLLM；被 Docker/k8s 统一调用 |
+| `run_docker.sh` | 宿主机 | GPU 选择（brsmi）+ `docker run` + 健康轮询 |
+| `k8s_yaml_gen.sh` | 宿主机 | 生成 k8s YAML 到 `k8s_yaml_gen/<model>.yaml`，不执行 apply |
+| `test_k8s.sh` | 宿主机 | `kubectl apply <yaml>` + 等待 Ready + API 测试 + 打印命令 |
 | `model_registry.conf` | — | 模型库：本地权重路径 + HF/MS 下载 ID |
 | `configs/<model>.conf` | — | 每个模型的运行参数；Docker 和 k8s 共用同一套配置 |
 
-**架构总结：**
-- 外层脚本（Docker/k8s）负责容器编排和环境准备
-- 内层脚本 `start_vllm_server.sh` 负责 vLLM 启动逻辑，通过容器 mount 在 Docker 和 k8s 中统一使用
-- 新增模型只需写一个 conf 文件，无需修改任何脚本
+**架构原则：**
+- 所有 vLLM 参数逻辑集中在 `vllm_server.sh`（容器内脚本）
+- 外层脚本只负责容器编排，不重复构建 vLLM 命令
+- k8s 分两步：先生成 YAML（可检查/修改），再部署测试
+- 新增模型只需一个 conf 文件，无需修改任何脚本
 
 已部署模型端口一览：
 
@@ -45,27 +48,18 @@ metadata:
 
 ```bash
 cd infer/llm/vllm
-sudo bash start_vllm_docker.sh <config>
+sudo bash run_docker.sh <config>
 ```
 
-`<config>` 接受以下格式：
+`<config>` 接受：裸模型名（`bge-m3`）、相对路径、绝对路径。
 
-| 格式 | 示例 |
-|------|------|
-| 裸模型名 | `bge-m3` → 自动解析为 `configs/bge-m3.conf` |
-| 相对路径 | `configs/qwen3-32b.conf` |
-| 绝对路径 | `/path/to/custom.conf` |
-
-### 1.2 典型启动流程
-
-**启动 bge-m3（embedding，1 GPU，端口 28800）：**
+### 1.2 典型流程
 
 ```bash
-cd infer/llm/vllm
-sudo bash start_vllm_docker.sh bge-m3
+sudo bash run_docker.sh bge-m3
 ```
 
-脚本输出示例：
+输出示例：
 ```
 [INFO]  Config      : bge-m3.conf
 [INFO]  Model key   : bge-m3  |  port=28800  |  tp=1  pp=1
@@ -78,32 +72,21 @@ sudo bash start_vllm_docker.sh bge-m3
 [ OK ]  vLLM server ready — vllm_bge-m3  :28800
 ```
 
-**启动 qwen3-32b（chat，2 GPU，端口 28800）：**
-
-```bash
-sudo bash start_vllm_docker.sh qwen3-32b
-```
-
-> 两个模型默认都使用 28800 端口，不能同时用 Docker 方式运行。若需同时运行，修改其中一个 conf 的 `port` 字段（例如改为 28801）。
+> 两个模型默认都使用 28800 端口，不能同时用 Docker 运行。若需同时运行，修改其中一个 conf 的 `port`。
 
 ### 1.3 查看日志
 
 ```bash
-# 容器标准输出
 sudo docker logs -f vllm_bge-m3
-
-# 同步写入文件（路径由脚本输出提示）
 tail -f infer/llm/vllm/logs/vllm_bge-m3_<timestamp>.log
 ```
 
 ### 1.4 停止 / 重启
 
 ```bash
-sudo docker stop vllm_bge-m3       # 停止
-sudo docker rm   vllm_bge-m3       # 删除容器
-
+sudo docker stop vllm_bge-m3 && sudo docker rm vllm_bge-m3
 # 重启：脚本自动删除同名旧容器
-sudo bash start_vllm_docker.sh bge-m3
+sudo bash run_docker.sh bge-m3
 ```
 
 ### 1.5 验证（curl 测试）
@@ -116,8 +99,6 @@ curl -s http://127.0.0.1:28800/v1/embeddings \
   | python3 -m json.tool
 ```
 
-期望响应：包含 `"object": "list"` 和 `"embedding": [...]` 数组。
-
 **qwen3-32b chat：**
 ```bash
 curl -s http://127.0.0.1:28800/v1/chat/completions \
@@ -126,39 +107,27 @@ curl -s http://127.0.0.1:28800/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-期望响应：包含 `"choices"` 数组和 `"content"` 字段。
-
 ---
 
 ## 2 — Kubernetes 方式启动
 
 ### 2.1 前置检查
 
-在部署前确认：
-
 ```bash
-# 集群节点处于 biren 模式（GPU 可分配）
+# 集群 GPU 可分配
 kubectl get node -o jsonpath='{.items[0].status.allocatable.birentech\.com/gpu}'
-# 期望输出: 8（或其他正整数）
-
 # device plugin 运行中
 kubectl get pods -n biren-gpu
-# 期望: biren-device-plugin-daemonset-xxx Running
-
 # RuntimeClass 已注册
 kubectl get runtimeclass biren
-# 期望: NAME=biren HANDLER=biren
 ```
 
 若 RuntimeClass 不存在，先执行 **2.2 RuntimeClass 注册**（一次性操作）。
 
 ### 2.2 RuntimeClass 注册（首次部署，需要 root）
 
-containerd v2.x 的新 CRI 插件（`io.containerd.cri.v1.runtime`）与旧版 gRPC 插件配置独立，biren runtime 需要在两处都注册。
-
-**Step 1：追加 containerd 配置**
-
 ```bash
+# Step 1: 追加 containerd 配置（cri.v1.runtime 节点）
 sudo bash -c "cat >> /etc/containerd/config.toml << 'EOF'
 
         [plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.biren]
@@ -166,21 +135,14 @@ sudo bash -c "cat >> /etc/containerd/config.toml << 'EOF'
           sandboxer = \"podsandbox\"
 
           [plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.biren.options]
-            BinaryName = \"/usr/local/birensupa/container-toolkit/biren-container-toolkit/bin/biren-container-runtime\"
+            BinaryName = \"/usr/local/birensupa/container-toolkit/biren-container-toolkit/bin/biren-container-toolkit\"
             SystemdCgroup = true
 EOF"
-```
 
-**Step 2：重启 containerd**
+# Step 2: 重启 containerd
+sudo systemctl restart containerd && kubectl get nodes
 
-```bash
-sudo systemctl restart containerd
-kubectl get nodes   # 确认节点仍 Ready
-```
-
-**Step 3：创建 RuntimeClass**
-
-```bash
+# Step 3: 创建 RuntimeClass
 kubectl apply -f - << 'EOF'
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
@@ -190,41 +152,40 @@ handler: biren
 EOF
 ```
 
-> **原理：** 镜像的 ENTRYPOINT 是 `biren_entrypoint.sh`，它设置 `LD_LIBRARY_PATH` 后 `exec "$@"`。`start_vllm_k8s.sh` 生成的 YAML 只有 `args` 字段（无 `command`），确保 ENTRYPOINT 正常执行，再由 `start_vllm_server.sh` 启动 vLLM。
+> **原理：** 镜像 ENTRYPOINT（`biren_entrypoint.sh`）设置 LD_LIBRARY_PATH 后 `exec "$@"`。k8s YAML 只使用 `args`（不用 `command`），确保 ENTRYPOINT 正常执行，再由 `vllm_server.sh` 启动 vLLM。
 
-### 2.3 部署命令
+### 2.3 典型工作流
 
 ```bash
 cd infer/llm/vllm
 
-# 单独部署
-bash start_vllm_k8s.sh bge-m3
-bash start_vllm_k8s.sh qwen3-32b
+# Step 1: 生成 YAML（可检查/修改后再部署）
+bash k8s_yaml_gen.sh bge-m3
+# → 输出: k8s_yaml_gen/bge-m3.yaml
 
-# 两个模型可同时运行（NodePort 不同，互不冲突）
+# Step 2: 部署并自动测试
+bash test_k8s.sh k8s_yaml_gen/bge-m3.yaml
 ```
 
-脚本自动：探测 GPU 节点 → 生成 YAML（将 SCRIPT_DIR 以 hostPath 挂载到容器）→ apply → 等待 Pod Ready → 打印 curl 命令。
-
-### 2.4 监控启动进度
-
-模型加载需要一定时间（bge-m3 约 2 分钟，qwen3-32b 约 5 分钟）：
+两个模型同时运行：
 
 ```bash
-# 查看 Pod 状态（等待 1/1 Running）
-kubectl get pods -n vllm -w
+bash k8s_yaml_gen.sh bge-m3    && bash test_k8s.sh k8s_yaml_gen/bge-m3.yaml
+bash k8s_yaml_gen.sh qwen3-32b && bash test_k8s.sh k8s_yaml_gen/qwen3-32b.yaml
+```
 
-# 查看启动日志（start_vllm_server.sh 的输出）
+### 2.4 监控进度
+
+```bash
+kubectl get pods -n vllm -w
 kubectl logs -n vllm -l app=vllm-bge-m3 -f
 kubectl logs -n vllm -l app=vllm-qwen3-32b -f
-
-# 查看服务和端点
 kubectl get svc,endpoints -n vllm
 ```
 
-### 2.5 验证（curl 测试）
+### 2.5 验证
 
-> 环境若设置了 HTTP 代理（`http_proxy`），需加 `--noproxy "*"`。
+> 若系统配置了 HTTP 代理，需加 `--noproxy "*"`。
 
 **bge-m3（NodePort 30800）：**
 ```bash
@@ -247,8 +208,7 @@ curl -s --noproxy "*" http://10.49.4.248:30801/v1/chat/completions \
 ```bash
 kubectl delete deployment/vllm-bge-m3 service/vllm-bge-m3 -n vllm
 kubectl delete deployment/vllm-qwen3-32b service/vllm-qwen3-32b -n vllm
-# 或一次性清理
-kubectl delete namespace vllm
+kubectl delete namespace vllm   # 全部清理
 ```
 
 ---
@@ -268,12 +228,12 @@ kubectl delete namespace vllm
 | `max_num_seqs` | ✓ | `64` | 最大并发序列数 |
 | `tensor_parallel_size` | ✓ | `2` | 张量并行数 |
 | `pipeline_parallel_size` | ✓ | `1` | 流水线并行数 |
-| `gpu_memory_utilization` | ✓ | `0.8` | GPU 显存使用比例（0~1） |
+| `gpu_memory_utilization` | ✓ | `0.8` | GPU 显存使用比例 |
 | `enable_chunked_prefill` | — | `true` | 启用 chunked prefill |
-| `enforce_eager` | — | `true` | 禁用 CUDA graph（嵌入模型建议开启） |
-| `distributed_executor_backend` | — | `mp` | 多进程后端：`mp` 或留空 |
-| `compilation_config` | — | `'{"cudagraph_mode": "FULL_DECODE_ONLY"}'` | JSON 格式，需用单引号包裹 |
-| `k8s_nodeport` | k8s必填 | `30800` | k8s NodePort 端口 |
+| `enforce_eager` | — | `true` | 禁用 CUDA graph |
+| `distributed_executor_backend` | — | `mp` | 多进程后端 |
+| `compilation_config` | — | `'{"cudagraph_mode": "FULL_DECODE_ONLY"}'` | JSON，需单引号包裹 |
+| `k8s_nodeport` | k8s必填 | `30800` | k8s NodePort |
 | `k8s_node_name` | — | `pj-3f-server008` | 指定 k8s 节点；空 = 自动探测 |
 
 **所需 GPU 数 = `tensor_parallel_size × pipeline_parallel_size`**
@@ -282,7 +242,7 @@ kubectl delete namespace vllm
 
 ```ini
 [<model_name>]
-local_path=<host 上的权重绝对路径>    # 留空 = 未下载，脚本会询问
+local_path=<权重绝对路径>   # 留空 = 未下载，脚本会询问
 huggingface_id=<org/repo>
 modelscope_id=<org/repo>
 ```
@@ -295,20 +255,17 @@ modelscope_id=<org/repo>
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `Docker image not found` | 本地无该镜像 | `sudo docker images` 确认镜像名称后更新 `start_vllm_docker.sh` 中的 `CONTAINER_IMAGE` |
-| `Not enough free GPUs` | 其他进程占用 GPU | `brsmi` 查看占用，或等待释放 |
-| `Container exited unexpectedly` | 脚本自动打印最后 30 行日志 | 检查日志，常见为 OOM 或权重路径不存在 |
-| 模型权重不存在 | `local_path` 目录不存在 | 脚本会交互式询问是否下载 |
+| `Docker image not found` | 本地无该镜像 | `sudo docker images` 确认后更新 `run_docker.sh` 中 `CONTAINER_IMAGE` |
+| `Not enough free GPUs` | GPU 被占用 | `brsmi` 查看占用 |
+| `Container exited unexpectedly` | 脚本打印最后 30 行日志 | 检查 OOM 或权重路径 |
 
 ### k8s 方式
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `ImportError: libsupti.so.1` | ENTRYPOINT 被跳过 | 确认 YAML 只有 `args` 无 `command`；脚本生成的 YAML 默认正确 |
-| `Failed to infer device type` | biren runtime 未注册 | 检查 RuntimeClass；重新执行 2.2 步骤 |
-| Pod 长时间 `0/1 Running` | readiness probe 初始延迟期 | 正常现象，bge-m3 约 2 min，qwen3-32b 约 5 min |
-| `Endpoints` 为空 | Pod 未 Ready | `kubectl describe pod -n vllm <pod>` 查看事件 |
-| NodePort curl 返回 502/空 | 系统 HTTP 代理干扰 | 加 `--noproxy "*"` 参数 |
-| Pod `Pending` 且有 GPU 不足提示 | 其他 Pod 已占用全部 GPU | `kubectl get pods -A` 查看占用情况 |
-| `k8s_nodeport not set` | conf 文件缺少该字段 | 在 `configs/<model>.conf` 中添加 `k8s_nodeport=<port>` |
-| 容器内 `start_vllm_server.sh: not found` | hostPath 挂载路径不一致 | 确认 SCRIPT_DIR 对应的宿主机目录存在且 nodeName 节点能访问到 |
+| `ImportError: libsupti.so.1` | ENTRYPOINT 被跳过 | 确认 YAML 只有 `args` 无 `command` |
+| `Failed to infer device type` | biren runtime 未注册 | 重新执行 2.2 步骤 |
+| Pod 长时间 `0/1 Running` | readiness probe 初始延迟 | 正常，bge-m3 约 2 min，qwen3-32b 约 5 min |
+| NodePort curl 返回 502 | 系统 HTTP 代理干扰 | 加 `--noproxy "*"` |
+| `Failed to parse XXX from YAML` | YAML 不是 k8s_yaml_gen.sh 生成的格式 | 确认 YAML 来自 `k8s_yaml_gen.sh` |
+| `vllm_server.sh: not found` | hostPath 挂载路径不一致 | 确认 SCRIPT_DIR 路径在目标 nodeName 上存在 |

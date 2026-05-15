@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Launch a BirenTech Docker container and start vLLM via start_vllm_server.sh inside it.
+# Launch a BirenTech Docker container and start vLLM via vllm_server.sh inside it.
 #
 # Usage:
-#   sudo bash start_vllm_docker.sh <config_file>
+#   sudo bash run_docker.sh <config_file>
 #
 # config_file may be:
 #   - a bare model name: bge-m3  (resolved to configs/bge-m3.conf)
@@ -12,10 +12,10 @@
 # The script:
 #   1. Selects free BirenTech GPUs via brsmi
 #   2. Starts the container (maps only the required /dev/biren/card_N devices)
-#   3. Inside the container, calls start_vllm_server.sh to launch vLLM
+#   3. Inside the container, calls vllm_server.sh to launch vLLM
 #   4. Polls /health until the server is ready
 #
-# /home is bind-mounted into the container so start_vllm_server.sh, model_registry.conf,
+# /home is bind-mounted into the container so vllm_server.sh, model_registry.conf,
 # and configs/ are accessible at the same paths as on the host.
 
 set -euo pipefail
@@ -191,7 +191,7 @@ $DOCKER_CMD image inspect "$CONTAINER_IMAGE" &>/dev/null || {
 # ── Start container ────────────────────────────────────────────────────────────
 # /home is bind-mounted so SCRIPT_DIR and CONFIG_FILE are at the same paths inside the container.
 # The image ENTRYPOINT (biren_entrypoint.sh) runs first to set LD_LIBRARY_PATH, then exec's args.
-INNER_SCRIPT="${SCRIPT_DIR}/start_vllm_server.sh"
+INNER_SCRIPT="${SCRIPT_DIR}/vllm_server.sh"
 
 # shellcheck disable=SC2086
 $DOCKER_CMD run -d \
