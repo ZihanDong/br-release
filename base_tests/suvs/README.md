@@ -2,6 +2,8 @@
 
 suvs（Supa Validation Suite）是壁仞 GPU 的硬件测试工具，支持 PCIe、P2P、HBM、内存带宽、视频、功耗、算力压力/性能等共 25 种测试任务，并通过 suvs 内置 GM 插件同步采集 GPU 时钟、温度和功耗数据。
 
+`run_suvs.sh` 提供两个预置任务集：**`base`**（18 个核心任务，日常验收推荐）和 **`all`**（全量 25 个任务，含扩展 HBM 模式和视频测试）。
+
 本目录包含两个脚本，分别负责**环境搭建**和**测试执行**。
 
 ---
@@ -21,17 +23,20 @@ suvs（Supa Validation Suite）是壁仞 GPU 的硬件测试工具，支持 PCIe
 # 1. 构建容器环境（只需执行一次，或容器丢失后重建）
 sudo bash base_tests/suvs/setup_suvs.sh
 
-# 2. 运行全部测试
-sudo bash base_tests/suvs/run_suvs.sh
+# 2. 运行 base 核心测试集（推荐日常使用）
+sudo bash base_tests/suvs/run_suvs.sh --tasks base
+
+# 运行全量测试（含扩展 HBM 和 video）
+sudo bash base_tests/suvs/run_suvs.sh --tasks all
 
 # 加 --verbose 同步在终端查看详细输出
-sudo bash base_tests/suvs/run_suvs.sh --verbose
+sudo bash base_tests/suvs/run_suvs.sh --tasks base --verbose
 
 # 只运行部分任务
 sudo bash base_tests/suvs/run_suvs.sh --tasks pcie,membw,hbm0
 
 # 指定 GPU、覆盖时长
-sudo bash base_tests/suvs/run_suvs.sh --tasks spcstress_fp32 --gpu-ids 0,1 --duration 60
+sudo bash base_tests/suvs/run_suvs.sh --tasks base --gpu-ids 2,3,4,5,6,7 --duration 60
 ```
 
 ---
@@ -82,18 +87,22 @@ CONTAINER_NAME="biren_suvs"
 
 ### 支持的测试任务
 
-| 任务名 | 说明 | 默认时长 |
-|--------|------|----------|
-| `pcie` | PCIe 带宽 | 5 s |
-| `p2p` | P2P 带宽 | 5 s |
-| `hbm0`–`hbm10` | HBM 显存测试（共 11 种子测试） | 5 s |
-| `membw` | 显存带宽 | 90 s |
-| `video` | 视频解码性能 | — |
-| `power_pct50` | 功耗压力（50% 功耗） | 90 s |
-| `power_idle` | 空闲功耗验证 | 90 s |
-| `spcstress_fp32/int8/bf16/tf32/fp16` | 算力压力测试（各精度） | 90 s |
-| `spcperf_fp32/int8/bf16/tf32/fp16` | 算力性能基准（各精度） | 90 s |
-| `all` | 以上全部（共 25 个任务） | — |
+| 任务名 | 说明 | 默认时长 | base | all |
+|--------|------|----------|:----:|:---:|
+| `pcie` | PCIe 带宽 | 5 s | ✓ | ✓ |
+| `p2p` | P2P 带宽 | 5 s | ✓ | ✓ |
+| `hbm0` | HBM Test0 [Walking 1 bit] | 5 s | ✓ | ✓ |
+| `hbm1` | HBM Test1 [Own address] | 5 s | ✓ | ✓ |
+| `hbm2`–`hbm9` | HBM Test2–9（扩展模式） | 5 s | — | ✓ |
+| `hbm10` | HBM Test10 [Memory stress] | 5 s | ✓ | ✓ |
+| `membw` | 显存带宽 | 90 s | ✓ | ✓ |
+| `video` | 视频解码性能 | — | — | ✓ |
+| `power_pct50` | 功耗压力（50% 功耗） | 90 s | ✓ | ✓ |
+| `power_idle` | 空闲功耗验证 | 90 s | ✓ | ✓ |
+| `spcstress_fp32/int8/bf16/tf32/fp16` | 算力压力测试（各精度） | 90 s | ✓ | ✓ |
+| `spcperf_fp32/int8/bf16/tf32/fp16` | 算力性能基准（各精度） | 90 s | ✓ | ✓ |
+| **`base`** | **核心任务集（共 18 个）** | — | — | — |
+| **`all`** | **全量任务集（共 25 个）** | — | — | — |
 
 ### conf 文件机制
 
@@ -119,7 +128,7 @@ conf 文件保存在本次运行的日志目录中，同时以唯一名称软链
 每次运行在 `logs/suvs/<时间戳>/` 下生成：
 
 ```
-suvs/20260514_132124/
+suvs/suvs_20260514_132124/
 ├── pcie.conf           # 该任务的完整 YAML conf（含 GM 包装）
 ├── pcie.log            # suvs 输出（含 GM 监控数据）
 ├── membw.conf

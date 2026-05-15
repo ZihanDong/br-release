@@ -58,6 +58,17 @@ TASK_DESC[spcperf_bf16]="SPC Perf bf16"
 TASK_DESC[spcperf_tf32]="SPC Perf tf32"
 TASK_DESC[spcperf_fp16]="SPC Perf fp16"
 
+# base: core daily tests (excludes hbm2-9 and video)
+BASE_TASKS=(
+    pcie p2p
+    hbm0 hbm1 hbm10
+    membw
+    power_pct50 power_idle
+    spcstress_fp32 spcstress_int8 spcstress_bf16 spcstress_tf32 spcstress_fp16
+    spcperf_fp32   spcperf_int8   spcperf_bf16   spcperf_tf32   spcperf_fp16
+)
+
+# all: full suite including extended HBM patterns and video
 ALL_TASKS=(
     pcie p2p
     hbm0 hbm1 hbm2 hbm3 hbm4 hbm5 hbm6 hbm7 hbm8 hbm9 hbm10
@@ -81,7 +92,8 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --tasks TASK[,TASK...]   Tasks to run, comma or space separated, or "all"
+  --tasks TASK[,TASK...]   Tasks to run, comma or space separated.
+                           Keywords: "base" (18 core tasks), "all" (full 25-task suite)
                            Available: ${ALL_TASKS[*]}
   --gpu-ids IDS            GPU IDs for test actions (e.g. "0" or "0,1,2"),
                            or "all" (default). GM monitoring always covers all GPUs.
@@ -90,6 +102,7 @@ Options:
   -h, --help               Show this help
 
 Examples:
+  $(basename "$0") --tasks base
   $(basename "$0") --tasks pcie,membw,hbm0
   $(basename "$0") --tasks all --duration 30 --gpu-ids 0
   $(basename "$0") --tasks "spcstress_fp32 spcperf_fp32" --verbose
@@ -107,7 +120,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ "$TASKS" == "all" ]] && TASKS="${ALL_TASKS[*]}"
+[[ "$TASKS" == "all" ]]  && TASKS="${ALL_TASKS[*]}"
+[[ "$TASKS" == "base" ]] && TASKS="${BASE_TASKS[*]}"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SETUP
@@ -118,7 +132,7 @@ mkdir -p "${SCRIPT_DIR}/${LOG_ROOT_REL}"
 LOG_ROOT="$(cd "${SCRIPT_DIR}/${LOG_ROOT_REL}" && pwd)"
 
 RUN_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-RUN_LOG_DIR="${LOG_ROOT}/${RUN_TIMESTAMP}"
+RUN_LOG_DIR="${LOG_ROOT}/suvs_${RUN_TIMESTAMP}"
 mkdir -p "${RUN_LOG_DIR}"
 
 SUMMARY_LOG="${RUN_LOG_DIR}/summary.log"
