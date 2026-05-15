@@ -12,7 +12,6 @@ suvs（Supa Validation Suite）是壁仞 GPU 的硬件测试工具，支持 PCIe
 |------|------|
 | `setup_suvs.sh` | 构建 Docker 测试容器，安装 sudcgm（含 suvs 二进制） |
 | `run_suvs.sh` | 在容器内执行测试，生成并保存 conf 文件，记录日志和摘要 |
-| `suvs_conf/` | 参考 conf 文件（只读，挂载至容器 `/suvs_conf`） |
 | `SUVS_TEST.md` | 官方测试命令手册与参数说明 |
 
 ---
@@ -44,9 +43,8 @@ sudo bash base_tests/suvs/run_suvs.sh --tasks spcstress_fp32 --gpu-ids 0,1 --dur
 
 1. 检查 Docker 镜像，不存在则从 `SDK_ROOT_PATH` 导入 `.tar`
 2. 删除同名旧容器，重新启动新容器（不映射 IB 设备，无需 InfiniBand）
-3. 挂载 `suvs_conf/` 为容器内 `/suvs_conf:ro`
-4. 在容器内运行 `sudcgm_*.run` 安装包（提供 suvs 二进制）
-5. 验证 suvs 可正常启动并列出 GPU 信息
+3. 在容器内运行 `sudcgm_*.run` 安装包（提供 suvs 二进制）
+4. 验证 suvs 可正常启动并列出 GPU 信息
 
 ### 主要配置变量（脚本顶部）
 
