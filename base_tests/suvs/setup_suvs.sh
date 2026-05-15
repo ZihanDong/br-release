@@ -12,7 +12,6 @@ IMAGE_NAME="birensupa-sdk:26.02.rc2-br1xx"
 # ───────────────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SUVS_CONF_DIR="${SCRIPT_DIR}/suvs_conf"
 
 # Load Docker image if not already present
 if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
@@ -40,7 +39,6 @@ docker run -d --name "$CONTAINER_NAME" \
     --ulimit nofile=1048576 \
     -v /home:/home \
     -v /data:/data \
-    -v "${SUVS_CONF_DIR}:/suvs_conf:ro" \
     --net host \
     --device /dev/biren \
     "$IMAGE_NAME" /bin/bash -c "tail -f /dev/null"
