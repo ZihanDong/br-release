@@ -2,10 +2,12 @@
 
 本目录提供两种方式在 BirenTech GPU 节点上拉起 vLLM OpenAI 兼容推理服务：
 
-| 方式 | 入口 | 适用场景 |
-|------|------|---------|
+| 方式 | 入口脚本 | 适用场景 |
+|------|---------|---------|
 | **Docker** | `start_vllm_server.sh` | 快速调试、单次运行 |
-| **Kubernetes** | `k8s/*.yaml` | 生产部署、持久运行 |
+| **Kubernetes** | `start_vllm_k8s.sh` | 生产部署、持久运行 |
+
+两个脚本共享同一套配置文件（`configs/*.conf`），启动参数完全一致。
 
 ---
 
@@ -13,14 +15,12 @@
 
 ```
 infer/llm/vllm/
-├── start_vllm_server.sh      # Docker 启动主脚本
+├── start_vllm_server.sh      # Docker 启动脚本
+├── start_vllm_k8s.sh         # Kubernetes 启动脚本（动态生成 YAML 并 apply）
 ├── model_registry.conf       # 模型库：本地路径 + HuggingFace/ModelScope ID
 ├── configs/
-│   ├── bge-m3.conf           # bge-m3 运行参数
-│   └── qwen3-32b.conf        # Qwen3-32B 运行参数
-├── k8s/
-│   ├── bge-m3.yaml           # bge-m3 Deployment + Service
-│   └── qwen3-32b.yaml        # Qwen3-32B Deployment + Service
+│   ├── bge-m3.conf           # bge-m3 运行参数（含 k8s_nodeport=30800）
+│   └── qwen3-32b.conf        # Qwen3-32B 运行参数（含 k8s_nodeport=30801）
 └── logs/                     # Docker 启动日志（自动生成）
 ```
 
@@ -31,9 +31,9 @@ infer/llm/vllm/
 | 依赖 | 说明 |
 |------|------|
 | BirenTech GPU 驱动 | `/dev/biren/card_*` 设备文件存在 |
-| `brsmi` | 用于查询 GPU 空闲状态 |
-| Docker | 需要 `sudo docker` 权限 |
-| `kubectl` | 仅 k8s 方式需要，需有 `~/.kube/config` |
+| `brsmi` | 用于查询 GPU 空闲状态（Docker 方式） |
+| Docker | 需要 `sudo docker` 权限（Docker 方式） |
+| `kubectl` | 需有 `~/.kube/config`（k8s 方式） |
 | 模型权重 | 存放于 host 的 `/data/models/` 目录下 |
 
 ---
@@ -128,20 +128,37 @@ containerd v2.x 的 `cri.v1.runtime` 插件需要单独注册 biren runtime hand
 
 如在新集群部署，参考 `skills/vllm.md` 中的"RuntimeClass 注册"章节。
 
-### 2.2 部署
+### 2.2 启动命令
 
 ```bash
-cd infer/llm/vllm/k8s
-
-# 部署单个模型
-kubectl apply -f bge-m3.yaml
-kubectl apply -f qwen3-32b.yaml
-
-# 两个同时部署（互不冲突，使用不同 NodePort）
-kubectl apply -f bge-m3.yaml -f qwen3-32b.yaml
+cd infer/llm/vllm
+bash start_vllm_k8s.sh <config>
 ```
 
-### 2.3 查看状态
+`<config>` 格式与 Docker 方式相同（裸模型名 / 相对路径 / 绝对路径）。
+
+脚本会自动完成：
+
+1. 加载配置文件（包括 `k8s_nodeport`、`k8s_node_name` 等 k8s 专属参数）
+2. 查找模型权重（同 Docker 方式，支持交互下载）
+3. 自动探测具有足够 `birentech.com/gpu` 资源的节点（或使用 `k8s_node_name` 指定）
+4. 动态生成 Kubernetes YAML（Namespace + Deployment + Service）并 `kubectl apply`
+5. 等待 Pod Ready，超时时间根据 GPU 数量自动计算
+6. 打印 curl 测试命令
+
+### 2.3 典型部署
+
+```bash
+# 启动 bge-m3（embedding，1 GPU，NodePort 30800）
+bash start_vllm_k8s.sh bge-m3
+
+# 启动 qwen3-32b（chat，2 GPU，NodePort 30801）
+bash start_vllm_k8s.sh qwen3-32b
+
+# 两个模型可同时运行（使用不同 NodePort，互不冲突）
+```
+
+### 2.4 查看状态
 
 ```bash
 kubectl get pods -n vllm
@@ -152,14 +169,14 @@ kubectl logs -n vllm -l app=vllm-bge-m3 -f
 kubectl logs -n vllm -l app=vllm-qwen3-32b -f
 ```
 
-### 2.4 端口说明
+### 2.5 端口说明
 
 | 模型 | containerPort | NodePort | 访问地址 |
 |------|--------------|----------|---------|
 | bge-m3 | 28800 | **30800** | `http://<node-ip>:30800` |
 | qwen3-32b | 28800 | **30801** | `http://<node-ip>:30801` |
 
-### 2.5 curl 测试
+### 2.6 curl 测试
 
 > 若系统配置了 HTTP 代理（`http_proxy` 环境变量），需添加 `--noproxy "*"` 参数。
 
@@ -179,11 +196,11 @@ curl -s --noproxy "*" http://10.49.4.248:30801/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-### 2.6 清理
+### 2.7 清理
 
 ```bash
-kubectl delete -f bge-m3.yaml
-kubectl delete -f qwen3-32b.yaml
+kubectl delete deployment/vllm-bge-m3 service/vllm-bge-m3 -n vllm
+kubectl delete deployment/vllm-qwen3-32b service/vllm-qwen3-32b -n vllm
 # 或删除整个 namespace
 kubectl delete namespace vllm
 ```
@@ -197,32 +214,36 @@ kubectl delete namespace vllm
 每个模型一个配置文件，使用 `key=value` 格式（可被 bash `source` 直接加载）：
 
 ```bash
-# 必填
+# ── 必填 ──────────────────────────────────────────────────────────────────────
 model_weights=bge-m3          # 对应 model_registry.conf 中的 section 名称
 
-# 网络
+# ── 网络 ──────────────────────────────────────────────────────────────────────
 port=28800                     # 服务监听端口
 
-# 推理参数
+# ── 推理参数 ──────────────────────────────────────────────────────────────────
 served_model_name=             # OpenAI API 中的模型名（空 = 使用权重路径）
 task=embed                     # 任务类型：embed（嵌入）或留空（对话）
 dtype=bfloat16                 # 权重精度：auto / bfloat16 / float16
 max_model_len=8192             # 最大序列长度（tokens）
 max_num_seqs=64                # 最大并发请求数
 
-# 并行配置（所需 GPU 数 = tensor_parallel_size × pipeline_parallel_size）
+# ── 并行配置（所需 GPU 数 = tensor_parallel_size × pipeline_parallel_size）──
 tensor_parallel_size=1
 pipeline_parallel_size=1
 gpu_memory_utilization=0.8
 
-# 可选 flag（true/false）
+# ── 可选 flag（true/false）────────────────────────────────────────────────────
 enable_chunked_prefill=false
 enforce_eager=true
 
-# 可选参数（空 = 不传）
+# ── 可选参数（空 = 不传）──────────────────────────────────────────────────────
 distributed_executor_backend=
 compilation_config=            # JSON 字符串，需用单引号包裹，例如：
                                # compilation_config='{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+
+# ── Kubernetes 专属 ───────────────────────────────────────────────────────────
+k8s_nodeport=30800             # NodePort 端口（必填，供 start_vllm_k8s.sh 使用）
+k8s_node_name=                 # 指定 k8s 节点名（空 = 自动探测有足够 GPU 的节点）
 ```
 
 ### 3.2 模型库（`model_registry.conf`）
@@ -258,14 +279,17 @@ modelscope_id=org/my-new-model
 
 ```bash
 cp configs/qwen3-32b.conf configs/my-new-model.conf
-# 修改 model_weights、port、tp/pp 等参数
+# 修改 model_weights、port、tp/pp、k8s_nodeport 等参数
 ```
 
-### 步骤 3：（k8s）复制并修改 YAML
+### 步骤 3：启动服务
 
 ```bash
-cp k8s/qwen3-32b.yaml k8s/my-new-model.yaml
-# 修改：metadata.name、app label、model 路径、GPU 数量、NodePort
+# Docker
+sudo bash start_vllm_server.sh my-new-model
+
+# Kubernetes
+bash start_vllm_k8s.sh my-new-model
 ```
 
 ---
@@ -282,3 +306,5 @@ cp k8s/qwen3-32b.yaml k8s/my-new-model.yaml
 ```bash
 brsmi gpu --query-gpu=index,memory.used,memory.free --format=csv,noheader
 ```
+
+k8s 方式下，GPU 分配由 biren device plugin 自动处理（通过 `birentech.com/gpu` 资源请求）。

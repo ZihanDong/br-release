@@ -34,5 +34,5 @@ The skill file provides:
 | `setup/kubernets/README.md` | Full Chinese k8s documentation |
 | `infer/llm/vllm/` | vLLM server scripts root |
 | `infer/llm/vllm/configs/` | Per-model vLLM run configs |
-| `infer/llm/vllm/k8s/` | k8s Deployment + Service YAMLs |
+| `infer/llm/vllm/start_vllm_k8s.sh` | Dynamic k8s deployment script (generates YAML from configs) |
 | `infer/llm/vllm/README.md` | Full Chinese vLLM documentation |

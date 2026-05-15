@@ -6,11 +6,10 @@ metadata:
   tags: [vllm, inference, birentech, gpu, docker, kubernetes, llm, embedding]
   scripts:
     - infer/llm/vllm/start_vllm_server.sh
+    - infer/llm/vllm/start_vllm_k8s.sh
     - infer/llm/vllm/model_registry.conf
     - infer/llm/vllm/configs/bge-m3.conf
     - infer/llm/vllm/configs/qwen3-32b.conf
-    - infer/llm/vllm/k8s/bge-m3.yaml
-    - infer/llm/vllm/k8s/qwen3-32b.yaml
 ---
 
 # Skill: vllm
@@ -20,10 +19,11 @@ metadata:
 | 文件 | 说明 |
 |------|------|
 | `start_vllm_server.sh` | Docker 方式启动主脚本；强制要求传入配置文件 |
+| `start_vllm_k8s.sh` | k8s 方式启动脚本；动态生成 YAML 并 apply；同样接受配置文件 |
 | `model_registry.conf` | 模型库：记录本地权重路径 + HF/MS 下载 ID |
-| `configs/<model>.conf` | 每个模型的 vLLM 运行参数（port、tp、pp 等） |
-| `k8s/bge-m3.yaml` | k8s Deployment + NodePort Service for bge-m3 |
-| `k8s/qwen3-32b.yaml` | k8s Deployment + NodePort Service for qwen3-32b |
+| `configs/<model>.conf` | 每个模型的 vLLM 运行参数（port、tp、pp、k8s_nodeport 等） |
+
+两个脚本共享同一套 `configs/*.conf`，新增模型只需写一个配置文件即可同时支持 Docker 和 k8s 部署。
 
 已部署模型端口一览：
 
@@ -185,20 +185,21 @@ handler: biren
 EOF
 ```
 
-> **原理：** 镜像的 entrypoint 是 `biren_entrypoint.sh`，它在启动时调用 `brsw_set_env.sh` 设置 `LD_LIBRARY_PATH`，使 `libsupti.so.1` 等 SDK 库可被 torch_br 加载。若 k8s 的 `command` 字段覆盖 entrypoint，SDK 初始化会被跳过。YAML 中只使用 `args`（不用 `command`），确保 entrypoint 正常执行。
+> **原理：** 镜像的 entrypoint 是 `biren_entrypoint.sh`，它在启动时调用 `brsw_set_env.sh` 设置 `LD_LIBRARY_PATH`，使 `libsupti.so.1` 等 SDK 库可被 torch_br 加载。YAML 中只使用 `args`（不用 `command`），确保 entrypoint 正常执行。
 
 ### 2.3 部署命令
 
 ```bash
-cd infer/llm/vllm/k8s
+cd infer/llm/vllm
 
 # 单独部署
-kubectl apply -f bge-m3.yaml
-kubectl apply -f qwen3-32b.yaml
+bash start_vllm_k8s.sh bge-m3
+bash start_vllm_k8s.sh qwen3-32b
 
-# 同时部署两个
-kubectl apply -f bge-m3.yaml -f qwen3-32b.yaml
+# 两个模型可同时运行（NodePort 不同，互不冲突）
 ```
+
+脚本自动完成：自动探测节点 → 生成 Namespace + Deployment + Service YAML → apply → 等待 Pod Ready → 打印 curl 命令。
 
 ### 2.4 监控启动进度
 
@@ -239,8 +240,8 @@ curl -s --noproxy "*" http://10.49.4.248:30801/v1/chat/completions \
 ### 2.6 清理
 
 ```bash
-kubectl delete -f bge-m3.yaml
-kubectl delete -f qwen3-32b.yaml
+kubectl delete deployment/vllm-bge-m3 service/vllm-bge-m3 -n vllm
+kubectl delete deployment/vllm-qwen3-32b service/vllm-qwen3-32b -n vllm
 
 # 或一次性清理整个 vllm namespace
 kubectl delete namespace vllm
@@ -268,6 +269,8 @@ kubectl delete namespace vllm
 | `enforce_eager` | — | `true` | 禁用 CUDA graph（嵌入模型建议开启） |
 | `distributed_executor_backend` | — | `mp` | 多进程后端：`mp` 或留空 |
 | `compilation_config` | — | `'{"cudagraph_mode": "FULL_DECODE_ONLY"}'` | JSON 格式，需用单引号包裹 |
+| `k8s_nodeport` | k8s必填 | `30800` | k8s NodePort 端口（供 start_vllm_k8s.sh 使用） |
+| `k8s_node_name` | — | `pj-3f-server008` | 指定 k8s 节点；空 = 自动探测 |
 
 **所需 GPU 数 = `tensor_parallel_size × pipeline_parallel_size`**
 
@@ -297,9 +300,10 @@ modelscope_id=<org/repo>              # modelscope download --model <id>
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `ImportError: libsupti.so.1` | YAML 中 `command` 覆盖了镜像 entrypoint | 确认 YAML 只有 `args` 字段，无 `command` |
+| `ImportError: libsupti.so.1` | YAML 中 `command` 覆盖了镜像 entrypoint | 脚本生成的 YAML 只有 `args` 字段，无 `command`；若手动修改过 YAML 请检查 |
 | `Failed to infer device type` | biren runtime 未注册或 SDK 库未加载 | 检查 RuntimeClass 是否存在；重新执行 2.2 步骤 |
 | Pod 长时间 `0/1 Running` | readiness probe 初始延迟期 | 正常现象，bge-m3 约 2 min，qwen3-32b 约 5 min |
 | `Endpoints` 为空 | Pod 未 Ready | `kubectl describe pod -n vllm <pod>` 查看事件 |
 | NodePort curl 返回 502/空 | 系统 HTTP 代理干扰 | 加 `--noproxy "*"` 参数 |
 | Pod `Pending` 且有 GPU 不足提示 | 其他 Pod 已占用全部 GPU | `kubectl get pods -A` 查看占用情况 |
+| `k8s_nodeport not set` | conf 文件缺少 `k8s_nodeport` 字段 | 在 `configs/<model>.conf` 中添加 `k8s_nodeport=<port>` |
