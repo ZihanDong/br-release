@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Deploy a vLLM OpenAI-compatible server as a Kubernetes Deployment.
+# Mounts the script directory into the container and runs start_vllm_server.sh inside it.
 #
 # Usage:
-#   ./start_vllm_k8s.sh <config_file>
+#   bash start_vllm_k8s.sh <config_file>
 #
 # config_file may be:
 #   - a bare model name: bge-m3  (resolved to configs/bge-m3.conf)
 #   - a relative path:   configs/bge-m3.conf
 #   - an absolute path:  /path/to/any.conf
+#
+# The script directory is bind-mounted into the container as a hostPath volume so that
+# start_vllm_server.sh, model_registry.conf, and configs/ are accessible at the same
+# paths inside the container as on the host.
 
 set -euo pipefail
 
@@ -36,7 +41,7 @@ usage() {
     exit 1
 }
 
-# ── Require config argument ────────────────────────────────────────────────────
+# ── Resolve config ─────────────────────────────────────────────────────────────
 [[ $# -lt 1 ]] && { _err "A config file is required."; usage; }
 
 CONFIG_ARG="$1"
@@ -55,7 +60,7 @@ fi
 [[ -z "$CONFIG_FILE" || ! -f "$CONFIG_FILE" ]] && {
     _err "Config not found: $CONFIG_ARG"; usage; }
 
-# ── Load config (defaults cover all optional fields) ───────────────────────────
+# ── Load config ────────────────────────────────────────────────────────────────
 port=8000
 served_model_name=""
 task=""
@@ -82,7 +87,7 @@ source "$CONFIG_FILE"
 _info "Config      : $(basename "$CONFIG_FILE")"
 _info "Model key   : $model_weights  |  port=$port  |  nodeport=$k8s_nodeport  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
 
-# ── Lookup model in registry ───────────────────────────────────────────────────
+# ── Registry lookup ────────────────────────────────────────────────────────────
 [[ ! -f "$MODEL_REGISTRY" ]] && { _err "Registry not found: $MODEL_REGISTRY"; exit 1; }
 
 registry_get() {
@@ -101,7 +106,7 @@ MODEL_MS_ID=$(registry_get "$model_weights" "modelscope_id")
 
 _info "Registry    : local=${MODEL_LOCAL_PATH:-(not set)}  hf=$MODEL_HF_ID  ms=$MODEL_MS_ID"
 
-# ── Check / download model weights ────────────────────────────────────────────
+# ── Weight check / download (on host, before deploying) ───────────────────────
 WEIGHTS_PATH=""
 if [[ -n "$MODEL_LOCAL_PATH" && -d "$MODEL_LOCAL_PATH" ]]; then
     WEIGHTS_PATH="$MODEL_LOCAL_PATH"
@@ -163,46 +168,8 @@ APP_LABEL="vllm-${model_weights}"
 DEPLOY_NAME="vllm-${model_weights}"
 SVC_NAME="vllm-${model_weights}"
 
-# ── Build YAML args list ──────────────────────────────────────────────────────
-# Each argument becomes an indented "- value" entry.
-# Values starting with '{' are wrapped in YAML single-quotes to avoid flow-mapping parse.
-args_yaml=""
-_arg() {
-    local val="$1"
-    if [[ "$val" == "{"* ]]; then
-        args_yaml+="        - '${val}'\n"
-    else
-        args_yaml+="        - \"${val}\"\n"
-    fi
-}
-
-_arg "python3"
-_arg "-m"
-_arg "vllm.entrypoints.openai.api_server"
-_arg "--host";                  _arg "0.0.0.0"
-_arg "--port";                  _arg "${port}"
-_arg "--model";                 _arg "${WEIGHTS_PATH}"
-[[ -n "$served_model_name" ]] && { _arg "--served_model_name"; _arg "${served_model_name}"; }
-[[ -n "$task" ]]              && { _arg "--task";               _arg "${task}"; }
-_arg "--trust_remote_code"
-_arg "--dtype";                 _arg "${dtype}"
-_arg "--kv_cache_dtype";        _arg "auto"
-_arg "--max_model_len";         _arg "${max_model_len}"
-_arg "--max_num_seqs";          _arg "${max_num_seqs}"
-_arg "--tensor_parallel_size";  _arg "${tensor_parallel_size}"
-_arg "--pipeline_parallel_size"; _arg "${pipeline_parallel_size}"
-_arg "--data_parallel_size";    _arg "1"
-_arg "--gpu_memory_utilization"; _arg "${gpu_memory_utilization}"
-[[ "$enforce_eager" == "true" ]]          && _arg "--enforce_eager"
-[[ "$enable_chunked_prefill" == "true" ]] && _arg "--enable_chunked_prefill"
-[[ -n "$distributed_executor_backend" ]] && {
-    _arg "--distributed_executor_backend"; _arg "${distributed_executor_backend}"; }
-if [[ -n "$compilation_config" ]]; then
-    # Strip surrounding single-quotes added in conf file for bash safety
-    cc="${compilation_config#\'}"
-    cc="${cc%\'}"
-    _arg "--compilation_config"; _arg "${cc}"
-fi
+# Paths inside the container (same as host because we mount SCRIPT_DIR at the same path)
+INNER_SCRIPT="${SCRIPT_DIR}/start_vllm_server.sh"
 
 # ── Generate and apply Kubernetes YAML ───────────────────────────────────────
 _info "Deploying   : $DEPLOY_NAME  ns/$K8S_NAMESPACE  node/$NODE_NAME  NodePort/$k8s_nodeport"
@@ -244,9 +211,12 @@ spec:
         image: ${CONTAINER_IMAGE}
         imagePullPolicy: IfNotPresent
         # No 'command' field — preserves the image ENTRYPOINT (biren_entrypoint.sh),
-        # which sets LD_LIBRARY_PATH for the BirenTech SDK before exec'ing args.
+        # which sets LD_LIBRARY_PATH for the BirenTech SDK before exec'ing the args.
+        # After SDK setup, the entrypoint exec's: bash start_vllm_server.sh <config>
         args:
-$(printf '%b' "${args_yaml}")
+        - bash
+        - "${INNER_SCRIPT}"
+        - "${CONFIG_FILE}"
         env:
         - name: VLLM_USE_V1
           value: "1"
@@ -293,6 +263,9 @@ $(printf '%b' "${args_yaml}")
         - name: model-weights
           mountPath: /data/models
           readOnly: true
+        - name: vllm-scripts
+          mountPath: ${SCRIPT_DIR}
+          readOnly: true
       volumes:
       - name: dshm
         emptyDir:
@@ -301,6 +274,10 @@ $(printf '%b' "${args_yaml}")
       - name: model-weights
         hostPath:
           path: /data/models
+          type: Directory
+      - name: vllm-scripts
+        hostPath:
+          path: ${SCRIPT_DIR}
           type: Directory
 
 ---

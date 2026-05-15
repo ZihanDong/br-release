@@ -4,10 +4,33 @@
 
 | 方式 | 入口脚本 | 适用场景 |
 |------|---------|---------|
-| **Docker** | `start_vllm_server.sh` | 快速调试、单次运行 |
+| **Docker** | `start_vllm_docker.sh` | 快速调试、单次运行 |
 | **Kubernetes** | `start_vllm_k8s.sh` | 生产部署、持久运行 |
 
-两个脚本共享同一套配置文件（`configs/*.conf`），启动参数完全一致。
+两个脚本都通过同一个容器内脚本 `start_vllm_server.sh` 拉起 vLLM 服务，参数来自共享的 `configs/*.conf` 配置文件。
+
+---
+
+## 架构说明
+
+```
+外部（宿主机）                          容器内
+┌─────────────────────┐               ┌──────────────────────────────┐
+│ start_vllm_docker.sh│  docker run   │ biren_entrypoint.sh          │
+│ ┌ GPU 选择           │ ──────────►  │   └─ exec args...            │
+│ └ 容器生命周期管理   │               │       bash start_vllm_server.sh│
+└─────────────────────┘               │         └─ exec python3 vllm │
+                                      └──────────────────────────────┘
+┌─────────────────────┐               ┌──────────────────────────────┐
+│ start_vllm_k8s.sh   │  kubectl      │ biren_entrypoint.sh          │
+│ ┌ 节点探测           │  apply ──►   │   └─ exec args...            │
+│ └ YAML 动态生成      │               │       bash start_vllm_server.sh│
+└─────────────────────┘               │         └─ exec python3 vllm │
+                                      └──────────────────────────────┘
+```
+
+`start_vllm_server.sh` 挂载到容器中（Docker 通过 `/home` bind-mount，k8s 通过 hostPath volume），
+由 BirenTech 镜像的 ENTRYPOINT（`biren_entrypoint.sh`）设置好 `LD_LIBRARY_PATH` 后调用。
 
 ---
 
@@ -15,8 +38,9 @@
 
 ```
 infer/llm/vllm/
-├── start_vllm_server.sh      # Docker 启动脚本
-├── start_vllm_k8s.sh         # Kubernetes 启动脚本（动态生成 YAML 并 apply）
+├── start_vllm_server.sh      # 容器内脚本：加载 conf → 查 registry → exec vllm
+├── start_vllm_docker.sh      # Docker 外层：GPU 选择 + 容器启动 + 健康轮询
+├── start_vllm_k8s.sh         # k8s 外层：节点探测 + 动态生成 YAML + 等待 Ready
 ├── model_registry.conf       # 模型库：本地路径 + HuggingFace/ModelScope ID
 ├── configs/
 │   ├── bge-m3.conf           # bge-m3 运行参数（含 k8s_nodeport=30800）
@@ -44,43 +68,40 @@ infer/llm/vllm/
 
 ```bash
 cd infer/llm/vllm
-sudo bash start_vllm_server.sh <config>
+sudo bash start_vllm_docker.sh <config>
 ```
 
 `<config>` 支持三种形式：
 
 ```bash
-sudo bash start_vllm_server.sh bge-m3                    # 裸模型名（自动找 configs/bge-m3.conf）
-sudo bash start_vllm_server.sh configs/qwen3-32b.conf   # 相对路径
-sudo bash start_vllm_server.sh /abs/path/to/custom.conf # 绝对路径
+sudo bash start_vllm_docker.sh bge-m3                    # 裸模型名（自动找 configs/bge-m3.conf）
+sudo bash start_vllm_docker.sh configs/qwen3-32b.conf   # 相对路径
+sudo bash start_vllm_docker.sh /abs/path/to/custom.conf # 绝对路径
 ```
 
 ### 1.2 脚本行为
 
-脚本按以下顺序执行：
+`start_vllm_docker.sh`（宿主机）按以下顺序执行：
 
-1. **加载配置文件** — 读取 `configs/<model>.conf` 中的所有参数
-2. **查找模型权重** — 在 `model_registry.conf` 中匹配 `model_weights` 字段
-3. **权重缺失时询问下载** — 支持通过 modelscope 或 huggingface 下载
-4. **选择空闲 GPU** — 用 `brsmi` 查询 `memory.used == 0` 的卡，选取 `tp × pp` 张
-5. **启动 Docker 容器** — 只映射所需的 `/dev/biren/card_N` 设备
-6. **等待服务就绪** — 轮询 `/health` 端点，最多等待 600 秒
-7. **打印 curl 测试命令**
+1. 加载配置文件，查找模型权重（如缺失则询问下载）
+2. 用 `brsmi` 查询空闲 GPU，选取 `tp × pp` 张
+3. 启动 Docker 容器，仅映射所需的 `/dev/biren/card_N` 设备
+4. 挂载 `/home:/home`（使 `start_vllm_server.sh` 在容器内可见）
+5. 容器内由 ENTRYPOINT → `start_vllm_server.sh` → `exec python3 -m vllm...` 完成启动
+6. 宿主机轮询 `/health` 端点，最多等待 600 秒
+7. 打印 curl 测试命令
 
 ### 1.3 容器管理
 
-脚本启动后容器在后台运行，容器名为 `vllm_<model_weights>`：
+容器名为 `vllm_<model_weights>`：
 
 ```bash
 # 查看日志
 sudo docker logs -f vllm_bge-m3
-sudo docker logs -f vllm_qwen3-32b
 
-# 停止
+# 停止 / 删除
 sudo docker stop vllm_bge-m3
-
-# 删除
-sudo docker rm vllm_bge-m3
+sudo docker rm   vllm_bge-m3
 ```
 
 日志同时写入 `logs/vllm_<model>_<timestamp>.log`。
@@ -120,8 +141,6 @@ curl -s http://127.0.0.1:28800/v1/chat/completions \
 
 **RuntimeClass 注册**（首次部署时一次性操作，已完成）：
 
-containerd v2.x 的 `cri.v1.runtime` 插件需要单独注册 biren runtime handler，否则镜像 entrypoint 中的 SDK 路径初始化不会执行。已完成的配置步骤：
-
 1. 在 `/etc/containerd/config.toml` 末尾追加 biren runtime handler（`cri.v1.runtime` 节点下）
 2. `systemctl restart containerd`
 3. 创建 `RuntimeClass` 资源（`handler: biren`）
@@ -135,18 +154,21 @@ cd infer/llm/vllm
 bash start_vllm_k8s.sh <config>
 ```
 
-`<config>` 格式与 Docker 方式相同（裸模型名 / 相对路径 / 绝对路径）。
+`<config>` 格式与 Docker 方式相同。
 
-脚本会自动完成：
+### 2.3 脚本行为
 
-1. 加载配置文件（包括 `k8s_nodeport`、`k8s_node_name` 等 k8s 专属参数）
-2. 查找模型权重（同 Docker 方式，支持交互下载）
-3. 自动探测具有足够 `birentech.com/gpu` 资源的节点（或使用 `k8s_node_name` 指定）
-4. 动态生成 Kubernetes YAML（Namespace + Deployment + Service）并 `kubectl apply`
-5. 等待 Pod Ready，超时时间根据 GPU 数量自动计算
-6. 打印 curl 测试命令
+`start_vllm_k8s.sh`（宿主机）按以下顺序执行：
 
-### 2.3 典型部署
+1. 加载配置文件，查找模型权重（如缺失则询问下载）
+2. 自动探测具有足够 `birentech.com/gpu` 资源的节点（或使用 `k8s_node_name` 指定）
+3. 动态生成 Kubernetes YAML（Namespace + Deployment + Service）并 `kubectl apply`
+   - Deployment 的 `args` 为：`[bash, start_vllm_server.sh, <config>]`
+   - 通过 hostPath volume 将脚本目录挂载到容器内（路径与宿主机一致）
+4. 等待 Pod Ready（超时时间根据 GPU 数量自动计算）
+5. 打印 curl 测试命令
+
+### 2.4 典型部署
 
 ```bash
 # 启动 bge-m3（embedding，1 GPU，NodePort 30800）
@@ -158,25 +180,24 @@ bash start_vllm_k8s.sh qwen3-32b
 # 两个模型可同时运行（使用不同 NodePort，互不冲突）
 ```
 
-### 2.4 查看状态
+### 2.5 查看状态
 
 ```bash
 kubectl get pods -n vllm
 kubectl get svc -n vllm
 
-# 查看日志（模型加载需要数分钟）
 kubectl logs -n vllm -l app=vllm-bge-m3 -f
 kubectl logs -n vllm -l app=vllm-qwen3-32b -f
 ```
 
-### 2.5 端口说明
+### 2.6 端口说明
 
 | 模型 | containerPort | NodePort | 访问地址 |
 |------|--------------|----------|---------|
 | bge-m3 | 28800 | **30800** | `http://<node-ip>:30800` |
 | qwen3-32b | 28800 | **30801** | `http://<node-ip>:30801` |
 
-### 2.6 curl 测试
+### 2.7 curl 测试
 
 > 若系统配置了 HTTP 代理（`http_proxy` 环境变量），需添加 `--noproxy "*"` 参数。
 
@@ -196,7 +217,7 @@ curl -s --noproxy "*" http://10.49.4.248:30801/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-### 2.7 清理
+### 2.8 清理
 
 ```bash
 kubectl delete deployment/vllm-bge-m3 service/vllm-bge-m3 -n vllm
@@ -211,7 +232,8 @@ kubectl delete namespace vllm
 
 ### 3.1 模型运行配置（`configs/*.conf`）
 
-每个模型一个配置文件，使用 `key=value` 格式（可被 bash `source` 直接加载）：
+每个模型一个配置文件，`key=value` 格式，可被 bash `source` 直接加载。
+被 `start_vllm_server.sh`、`start_vllm_docker.sh`、`start_vllm_k8s.sh` 共同读取。
 
 ```bash
 # ── 必填 ──────────────────────────────────────────────────────────────────────
@@ -248,13 +270,11 @@ k8s_node_name=                 # 指定 k8s 节点名（空 = 自动探测有足
 
 ### 3.2 模型库（`model_registry.conf`）
 
-记录所有模型的本地路径和下载 ID，INI 格式：
-
 ```ini
 [bge-m3]
-local_path=/data/models/BAAI/bge-m3     # 本地权重目录（为空则视为未下载）
-huggingface_id=BAAI/bge-m3              # huggingface-cli download <id>
-modelscope_id=BAAI/bge-m3              # modelscope download --model <id>
+local_path=/data/models/BAAI/bge-m3
+huggingface_id=BAAI/bge-m3
+modelscope_id=BAAI/bge-m3
 
 [qwen3-32b]
 local_path=/data/models/Qwen/Qwen3-32B
@@ -286,23 +306,24 @@ cp configs/qwen3-32b.conf configs/my-new-model.conf
 
 ```bash
 # Docker
-sudo bash start_vllm_server.sh my-new-model
+sudo bash start_vllm_docker.sh my-new-model
 
 # Kubernetes
 bash start_vllm_k8s.sh my-new-model
 ```
 
+不需要修改任何脚本，所有参数从配置文件中读取。
+
 ---
 
 ## 五、GPU 使用规则（Docker 方式）
 
-`start_vllm_server.sh` 自动从 `brsmi` 查询空闲 GPU（`memory.used == 0`），按索引从小到大选取 `tensor_parallel_size × pipeline_parallel_size` 张。
+`start_vllm_docker.sh` 自动从 `brsmi` 查询空闲 GPU（`memory.used == 0`），按索引从小到大选取 `tensor_parallel_size × pipeline_parallel_size` 张。
 
 - 选中的卡以 `--device /dev/biren/card_N` 独占映射到容器
 - 同时设置 `BIREN_VISIBLE_DEVICES=N,...` 环境变量
 - 若空闲卡数量不足，脚本报错退出并打印当前 GPU 状态
 
-**查看当前 GPU 状态：**
 ```bash
 brsmi gpu --query-gpu=index,memory.used,memory.free --format=csv,noheader
 ```
