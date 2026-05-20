@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 MODEL_REGISTRY="${SCRIPT_DIR}/model_registry.conf"
-CONTAINER_IMAGE='10.49.4.248:32000/infer/birensupa-smartinfer-vllm:26.04.beta1-py310-pt2.8.0-br1xx'
+CONTAINER_IMAGE='10.49.4.248:32000/infer/birensupa-smartinfer-vllm:26.05.14-py310-pt2.8.0-br1xx'
 K8S_NAMESPACE='vllm'
 YAML_DIR="${SCRIPT_DIR}/k8s_yaml_gen"
 
@@ -157,9 +157,11 @@ mem_lim_gi=$((gpu_needed * 80))
 initial_delay_ready=$(( gpu_needed * 120 + 60 ))
 initial_delay_live=$(( gpu_needed * 180 + 60 ))
 
-APP_LABEL="vllm-${model_weights}"
-DEPLOY_NAME="vllm-${model_weights}"
-SVC_NAME="vllm-${model_weights}"
+# k8s names must match DNS-1035: dots not allowed — replace with dashes
+k8s_name="${model_weights//./-}"
+APP_LABEL="vllm-${k8s_name}"
+DEPLOY_NAME="vllm-${k8s_name}"
+SVC_NAME="vllm-${k8s_name}"
 
 INNER_SCRIPT="${SCRIPT_DIR}/vllm_server.sh"
 
@@ -257,6 +259,12 @@ spec:
         - name: vllm-scripts
           mountPath: ${SCRIPT_DIR}
           readOnly: true
+        - name: patch-fused-moe
+          mountPath: /usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/layers/fused_moe/layer.py
+          readOnly: true
+        - name: patch-parameter
+          mountPath: /usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/parameter.py
+          readOnly: true
       volumes:
       - name: dshm
         emptyDir:
@@ -270,6 +278,14 @@ spec:
         hostPath:
           path: ${SCRIPT_DIR}
           type: Directory
+      - name: patch-fused-moe
+        hostPath:
+          path: ${SCRIPT_DIR}/patches/vllm_br_fused_moe_layer.py
+          type: File
+      - name: patch-parameter
+        hostPath:
+          path: ${SCRIPT_DIR}/patches/vllm_br_parameter.py
+          type: File
 
 ---
 apiVersion: v1
