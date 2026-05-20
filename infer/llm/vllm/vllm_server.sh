@@ -66,6 +66,8 @@ enforce_eager=false
 distributed_executor_backend=""
 compilation_config=""
 model_weights=""
+extra_env=""
+extra_vllm_args=""
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
@@ -127,11 +129,22 @@ if [[ -n "$compilation_config" ]]; then
     # bash 'source' already strips the single-quotes used in .conf for safety
     vllm_args+=(--compilation_config "${compilation_config}")
 fi
+# Extra model-specific vLLM flags (e.g. --enable_expert_parallel)
+if [[ -n "${extra_vllm_args:-}" ]]; then
+    read -ra _extra_arr <<< "${extra_vllm_args}"
+    vllm_args+=("${_extra_arr[@]}")
+fi
 
 # ── Launch ─────────────────────────────────────────────────────────────────────
 export VLLM_USE_V1=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export VLLM_BR_WEIGHT_TYPE=NUMA
+# Extra model-specific env vars (space-separated KEY=VALUE pairs from conf)
+if [[ -n "${extra_env:-}" ]]; then
+    for _kv in ${extra_env}; do
+        export "$_kv"
+    done
+fi
 
 _ok "Launching   : ${vllm_args[*]}"
 echo ""

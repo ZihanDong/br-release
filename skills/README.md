@@ -7,7 +7,8 @@ This directory contains skill files for use by Claude Code agents. Each skill is
 | Skill | File | Description |
 |-------|------|-------------|
 | `k8s` | [k8s.md](k8s.md) | All k8s operations: cluster setup, node modes, private registry, cleanup |
-| `vllm` | [vllm.md](vllm.md) | Launch vLLM inference servers (Docker + k8s) on BirenTech GPU nodes; three-script arch: inner start_vllm_server.sh + outer docker/k8s launchers |
+| `vllm` | [vllm.md](vllm.md) | Launch vLLM inference servers (Docker + k8s) on BirenTech GPU nodes; four-script arch: vllm_server.sh + run_docker.sh + k8s_yaml_gen.sh + test_k8s.sh |
+| `vllm-script-to-conf` | [vllm-script-to-conf.md](vllm-script-to-conf.md) | Convert raw vLLM launch scripts (start_<model>.sh) into structured conf files under configs/ |
 
 ## How to Use in an Agent
 
@@ -34,7 +35,8 @@ The skill file provides:
 | `setup/kubernets/README.md` | Full Chinese k8s documentation |
 | `infer/llm/vllm/` | vLLM server scripts root |
 | `infer/llm/vllm/configs/` | Per-model vLLM run configs |
-| `infer/llm/vllm/start_vllm_server.sh` | Inner container script (runs inside container, execs vLLM) |
-| `infer/llm/vllm/start_vllm_docker.sh` | Outer Docker launcher (GPU select + docker run) |
-| `infer/llm/vllm/start_vllm_k8s.sh` | Outer k8s launcher (generates YAML, mounts script dir) |
+| `infer/llm/vllm/vllm_server.sh` | Inner container script (runs inside container, execs vLLM) |
+| `infer/llm/vllm/run_docker.sh` | Outer Docker launcher (GPU select + docker run) |
+| `infer/llm/vllm/k8s_yaml_gen.sh` | k8s YAML generator (saves to k8s_yaml_gen/, no apply) |
+| `infer/llm/vllm/test_k8s.sh` | k8s deploy + test (kubectl apply + wait + API smoke test) |
 | `infer/llm/vllm/README.md` | Full Chinese vLLM documentation |

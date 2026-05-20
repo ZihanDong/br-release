@@ -1,9 +1,9 @@
 ---
 name: vllm
-description: Start and manage vLLM OpenAI-compatible inference servers on BirenTech GPU nodes. Covers Docker and Kubernetes deployments, model registry management, GPU selection, and troubleshooting. Read this skill before launching any vLLM server.
+description: Start and manage vLLM OpenAI-compatible inference servers on BirenTech GPU nodes. Covers Docker and Kubernetes deployments, model registry management, GPU selection, weight quantization, and troubleshooting. Read this skill before launching any vLLM server.
 metadata:
   type: skill
-  tags: [vllm, inference, birentech, gpu, docker, kubernetes, llm, embedding]
+  tags: [vllm, inference, birentech, gpu, docker, kubernetes, llm, embedding, quantization]
   scripts:
     - infer/llm/vllm/vllm_server.sh
     - infer/llm/vllm/run_docker.sh
@@ -12,6 +12,8 @@ metadata:
     - infer/llm/vllm/model_registry.conf
     - infer/llm/vllm/configs/bge-m3.conf
     - infer/llm/vllm/configs/qwen3-32b.conf
+    - infer/llm/vllm/configs/minimax-m2.5.conf
+    - infer/llm/vllm/quant/run_quant.sh
 ---
 
 # Skill: vllm
@@ -35,10 +37,11 @@ metadata:
 
 已部署模型端口一览：
 
-| 模型 | 类型 | Docker 端口 | k8s NodePort |
-|------|------|------------|-------------|
-| bge-m3 | embedding | 28800 | 30800 |
-| qwen3-32b | chat | 28800 | 30801 |
+| 模型 | 类型 | Docker 端口 | k8s NodePort | 权重格式 |
+|------|------|------------|-------------|---------|
+| bge-m3 | embedding | 28800 | 30800 | BF16 |
+| qwen3-32b | chat | 28800 | 30801 | BF16 |
+| minimax-m2.5 | chat (MoE) | 20027 | 30802 | INT8 (量化) |
 
 ---
 
@@ -233,6 +236,8 @@ kubectl delete namespace vllm   # 全部清理
 | `enforce_eager` | — | `true` | 禁用 CUDA graph |
 | `distributed_executor_backend` | — | `mp` | 多进程后端 |
 | `compilation_config` | — | `'{"cudagraph_mode": "FULL_DECODE_ONLY"}'` | JSON，需单引号包裹 |
+| `extra_env` | — | `"KEY1=V1 KEY2=V2"` | 额外 env 变量，空格分隔的 KEY=VALUE 对，整体加引号 |
+| `extra_vllm_args` | — | `"--enable_expert_parallel"` | 额外 vLLM CLI 参数，整体加引号 |
 | `k8s_nodeport` | k8s必填 | `30800` | k8s NodePort |
 | `k8s_node_name` | — | `pj-3f-server008` | 指定 k8s 节点；空 = 自动探测 |
 
@@ -269,3 +274,70 @@ modelscope_id=<org/repo>
 | NodePort curl 返回 502 | 系统 HTTP 代理干扰 | 加 `--noproxy "*"` |
 | `Failed to parse XXX from YAML` | YAML 不是 k8s_yaml_gen.sh 生成的格式 | 确认 YAML 来自 `k8s_yaml_gen.sh` |
 | `vllm_server.sh: not found` | hostPath 挂载路径不一致 | 确认 SCRIPT_DIR 路径在目标 nodeName 上存在 |
+
+---
+
+## 5 — 量化权重生成（FP8 → INT8）
+
+部分模型（如 MiniMax M2.5）官方仅提供 FP8 权重，需先转换为 INT8 才能推理。量化流程分两步：
+
+```
+FP8 原始权重
+    ↓ cast_fp8_bf16.py     (单 GPU，CUDA 反量化)
+BF16 中间权重（临时）
+    ↓ convert-to-compressed.py  (torchrun 分布式，channel-wise INT8)
+INT8 packed 权重
+```
+
+### 5.1 量化前提
+
+- 量化脚本在 `infer/llm/vllm/quant/` 目录下
+- 使用与 vLLM server 相同的 BirenTech smartinfer-vllm 镜像运行
+- 量化过程需要占用全部 GPU（默认 8 张），耗时较长（数小时）
+- 可断点续跑：若中间 BF16 或最终 INT8 目录已存在，对应 Stage 会被跳过
+
+### 5.2 量化脚本文件
+
+| 文件 | 说明 |
+|------|------|
+| `quant/run_quant.sh` | 一键启动量化容器，执行 Stage 1 + Stage 2 |
+| `quant/cast_fp8_bf16.py` | Stage 1：FP8 safetensors → BF16 safetensors |
+| `quant/convert-to-compressed.py` | Stage 2：BF16 → INT8 packed（torchrun 分布式） |
+| `quant/utils.py` | 量化辅助函数（`quantize_tensor`），被 Stage 2 脚本调用 |
+
+### 5.3 配置与运行
+
+编辑 `quant/run_quant.sh` 开头的配置变量（默认已为 MiniMax M2.5 配置好）：
+
+```bash
+FP8_PATH="/data/models/MiniMax/MiniMax-M2.5"       # FP8 原始权重
+TEMP_BF16_PATH="/data/models/MiniMax/MiniMax-M2.5-TEMP"  # BF16 临时权重
+INT8_PATH="/data/models/MiniMax/MiniMax-M2.5-INT8"  # 最终 INT8 权重
+CONTAINER_IMAGE="birensupa-smartinfer-vllm:..."
+NUM_GPUS=8
+```
+
+然后运行：
+
+```bash
+cd infer/llm/vllm
+sudo bash quant/run_quant.sh
+# 日志写入 logs/quant_m2.5_<timestamp>.log
+```
+
+### 5.4 量化后验证
+
+INT8 权重生成后，可直接用 `run_docker.sh` 启动 MiniMax M2.5 服务：
+
+```bash
+sudo bash run_docker.sh minimax-m2.5
+```
+
+测试 API：
+
+```bash
+curl -s http://127.0.0.1:20027/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "/data/models/MiniMax/MiniMax-M2.5-INT8", "messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 64}' \
+  | python3 -m json.tool
+```

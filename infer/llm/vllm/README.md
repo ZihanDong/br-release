@@ -50,12 +50,18 @@ infer/llm/vllm/
 ├── test_k8s.sh           # k8s 部署测试：apply YAML + 等待就绪 + API 测试 + 打印命令
 ├── model_registry.conf   # 模型库：本地路径 + HuggingFace/ModelScope ID
 ├── configs/
-│   ├── bge-m3.conf       # bge-m3 运行参数（含 k8s_nodeport=30800）
-│   └── qwen3-32b.conf    # Qwen3-32B 运行参数（含 k8s_nodeport=30801）
+│   ├── bge-m3.conf         # bge-m3（embedding，端口 28800，k8s NodePort 30800）
+│   ├── qwen3-32b.conf      # Qwen3-32B（chat，端口 28800，k8s NodePort 30801）
+│   └── minimax-m2.5.conf   # MiniMax M2.5（chat MoE，INT8，端口 20027，k8s NodePort 30802）
+├── quant/                # 权重量化工具
+│   ├── run_quant.sh        # 一键量化：FP8 → BF16 → INT8（在 BirenTech 容器内运行）
+│   ├── cast_fp8_bf16.py    # Stage 1：FP8 safetensors → BF16
+│   ├── convert-to-compressed.py  # Stage 2：BF16 → INT8 packed（torchrun 分布式）
+│   └── utils.py            # 量化辅助函数
 ├── k8s_yaml_gen/         # 生成的 k8s YAML（临时文件，可按需修改后应用）
 │   ├── bge-m3.yaml
 │   └── qwen3-32b.yaml
-└── logs/                 # Docker 启动日志（自动生成）
+└── logs/                 # 启动 / 量化日志（自动生成）
 ```
 
 ---
@@ -324,6 +330,48 @@ bash test_k8s.sh k8s_yaml_gen/my-model.yaml
 
 ```bash
 brsmi gpu --query-gpu=index,memory.used,memory.free --format=csv,noheader
+```
+
+---
+
+## 六、权重量化（FP8 → INT8）
+
+部分模型（如 MiniMax M2.5）官方只提供 FP8 权重，需离线量化为 INT8 格式。
+
+### 6.1 量化流程
+
+```
+FP8 权重  ──[cast_fp8_bf16.py]──►  BF16 临时权重  ──[convert-to-compressed.py]──►  INT8 权重
+```
+
+| Stage | 脚本 | 方式 | 说明 |
+|-------|------|------|------|
+| Stage 1 | `quant/cast_fp8_bf16.py` | 单进程 | FP8 safetensors 反量化为 BF16 |
+| Stage 2 | `quant/convert-to-compressed.py` | `torchrun` 8 进程 | BF16 → channel-wise INT8 packed |
+
+### 6.2 一键量化
+
+编辑 `quant/run_quant.sh` 开头的路径变量后运行：
+
+```bash
+cd infer/llm/vllm
+sudo bash quant/run_quant.sh
+# 日志写入 logs/quant_m2.5_<timestamp>.log
+```
+
+脚本支持**断点续跑**：若 BF16 或 INT8 目标目录的 `model.safetensors.index.json` 已存在，对应 Stage 会跳过。
+
+### 6.3 量化后验证
+
+```bash
+# Docker 启动
+sudo bash run_docker.sh minimax-m2.5
+
+# 测试 API
+curl -s http://127.0.0.1:20027/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "/data/models/MiniMax/MiniMax-M2.5-INT8", "messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 64}' \
+  | python3 -m json.tool
 ```
 
 k8s 方式下，GPU 分配由 biren device plugin 自动处理（通过 `birentech.com/gpu` 资源请求）。
