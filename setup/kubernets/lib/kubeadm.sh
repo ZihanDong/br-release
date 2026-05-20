@@ -26,7 +26,16 @@ _add_repo_new() {
     echo "deb [signed-by=${keyring}] https://pkgs.k8s.io/core:/stable:/v${minor}/deb/ /" \
         > /etc/apt/sources.list.d/kubernetes.list
 
-    apt-get update -qq
+    # Only refresh the k8s repo — avoids failures from other broken apt sources
+    # (stale mirrors, proxy-intercepted repos, etc.) in the environment.
+    apt-get update -qq \
+        -o Dir::Etc::sourcelist="sources.list.d/kubernetes.list" \
+        -o Dir::Etc::sourceparts="-" \
+        -o APT::Get::List-Cleanup="0" \
+        2>&1 || {
+        log_warn "k8s repo 刷新失败，尝试全量 apt-get update..."
+        apt-get update -qq 2>&1 || log_warn "apt-get update 出现部分错误，继续..."
+    }
 }
 
 # Legacy repo layout (k8s ≤ 1.27): packages.cloud.google.com
@@ -45,7 +54,14 @@ _add_repo_legacy() {
     echo "deb [signed-by=${keyring}] https://apt.kubernetes.io/ kubernetes-xenial main" \
         > /etc/apt/sources.list.d/kubernetes.list
 
-    apt-get update -qq
+    apt-get update -qq \
+        -o Dir::Etc::sourcelist="sources.list.d/kubernetes.list" \
+        -o Dir::Etc::sourceparts="-" \
+        -o APT::Get::List-Cleanup="0" \
+        2>&1 || {
+        log_warn "k8s repo 刷新失败，尝试全量 apt-get update..."
+        apt-get update -qq 2>&1 || log_warn "apt-get update 出现部分错误，继续..."
+    }
 }
 
 # ── Resolve the latest patch for a given minor version ───────────────────────

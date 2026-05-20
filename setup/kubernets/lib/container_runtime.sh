@@ -82,6 +82,21 @@ _pause_image() {
     echo "${base}/pause:${pause_ver}"
 }
 
+# ── Fix containerd running in Docker mode (disabled_plugins = ["cri"]) ────────
+# When Docker installs containerd it writes a minimal config with CRI disabled.
+# k8s requires CRI. Regenerate from scratch in that case — Docker's config has
+# no custom runtimes worth preserving.
+_fix_docker_mode_config() {
+    local cfg="${CONTAINERD_CONFIG}"
+    grep -qE '^\s*disabled_plugins\s*=.*"cri"' "${cfg}" 2>/dev/null || return 0
+
+    log_warn "检测到 containerd 以 Docker 模式运行（disabled_plugins 包含 \"cri\"）。"
+    log_warn "  k8s 需要 CRI 插件，正在重新生成 containerd 配置..."
+    cp -p "${cfg}" "${cfg}.docker-bak.$(date +%s)"
+    containerd config default > "${cfg}"
+    log_info "containerd 配置已重新生成（原配置备份为 ${cfg}.docker-bak.*）。"
+}
+
 # ── Patch an existing config in-place (preserves custom runtimes) ─────────────
 # Used when containerd is already installed (e.g. has vendor GPU runtime configs).
 _patch_existing_config() {
@@ -90,6 +105,10 @@ _patch_existing_config() {
     local ctrd_major; ctrd_major=$(_containerd_major_version)
 
     log_info "Patching existing containerd config (preserving custom runtimes)..."
+
+    # Must run before backup so the backup reflects the fixed state
+    _fix_docker_mode_config
+
     cp -p "${cfg}" "${cfg}.bak.$(date +%s)"
 
     if [[ "${ctrd_major}" -ge 2 ]]; then

@@ -76,10 +76,32 @@ configure_hostname() {
     fi
 }
 
+# ── Clean up stale third-party Docker apt sources ────────────────────────────
+# Aliyun and other third-party Docker CE mirrors frequently become unavailable
+# (403 Forbidden, invalid signatures). Disable any Docker CE source that is NOT
+# from the official download.docker.com to prevent apt-get update failures.
+_disable_stale_docker_sources() {
+    local f disabled=0
+    for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list; do
+        [[ -f "$f" ]] || continue
+        if grep -qE 'docker-ce|docker\.io' "$f" 2>/dev/null \
+           && ! grep -q 'download\.docker\.com' "$f" 2>/dev/null; then
+            log_warn "禁用已失效的第三方 Docker apt 源: $(basename "$f") → .bak"
+            mv "$f" "${f}.bak"
+            disabled=$((disabled + 1))
+        fi
+    done
+    [[ $disabled -gt 0 ]] && log_info "已禁用 ${disabled} 个第三方 Docker apt 源。"
+    return 0
+}
+
 # ── Base packages ─────────────────────────────────────────────────────────────
 install_base_deps() {
     log_info "Installing base dependencies..."
-    apt-get update -qq
+    _disable_stale_docker_sources
+    # Non-fatal: partial repo failures (proxy interception, stale mirrors) are
+    # acceptable as long as the packages we need are available in a working repo.
+    apt-get update -qq 2>&1 || log_warn "apt-get update 出现部分错误（某些 repo 不可达），继续安装..."
     apt_install \
         apt-transport-https \
         ca-certificates \

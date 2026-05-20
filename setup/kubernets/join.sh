@@ -71,6 +71,9 @@ esac
 : "${KUBECONFIG:=/etc/kubernetes/admin.conf}"
 : "${PLUGIN_NAMESPACE:=biren-gpu}"
 
+# Tracks whether DaemonSet deployment was skipped (no admin.conf on worker)
+DAEMONSET_DEPLOYED=false
+
 # ── 前置检查 ──────────────────────────────────────────────────────────────────
 preflight_check() {
     require_root
@@ -234,10 +237,12 @@ apply_biren_role() {
     # 3. 部署/确认 DaemonSet（需要 admin 权限）
     if [[ -f "${KUBECONFIG}" ]]; then
         _deploy_plugin_daemonset
+        DAEMONSET_DEPLOYED=true
     else
         log_warn "跳过 DaemonSet 部署（无 admin.conf）。"
         log_warn "请在 Master 上执行以下命令完成首次 DaemonSet 部署："
-        log_warn "  sudo ./set-node-mode.sh biren ${node_name}"
+        log_warn "  sudo bash set-node-mode.sh biren ${node_name}"
+        DAEMONSET_DEPLOYED=false
     fi
 }
 
@@ -327,11 +332,22 @@ print_summary() {
         log_info "  kubectl get node ${node_name} -o jsonpath='{.status.allocatable}'"
     fi
     log_info "────────────────────────────────────────────────────────"
-    log_info "后续切换节点角色（在 Master 上执行）："
-    log_info "  纯 CPU 节点  : sudo ./set-node-mode.sh cpu  ${node_name}"
-    log_info "  BirenTech GPU: sudo ./set-node-mode.sh biren ${node_name}"
-    log_info "  恢复隔离     : sudo ./set-node-mode.sh none  ${node_name}"
-    log_info "════════════════════════════════════════════════════════"
+    if [[ "${MODE}" == "biren" && "${DAEMONSET_DEPLOYED}" != "true" ]]; then
+        log_warn "════════════════════════════════════════════════════════"
+        log_warn "  ⚠️  必要后续操作（在 Master 节点上执行）："
+        log_warn "  GPU DaemonSet 尚未部署，请在 Master 上运行："
+        log_warn ""
+        log_warn "    sudo bash set-node-mode.sh biren ${node_name}"
+        log_warn ""
+        log_warn "  完成后 GPU 资源才会对调度器可见。"
+        log_warn "════════════════════════════════════════════════════════"
+    else
+        log_info "后续切换节点角色（在 Master 上执行）："
+        log_info "  纯 CPU 节点  : sudo bash set-node-mode.sh cpu  ${node_name}"
+        log_info "  BirenTech GPU: sudo bash set-node-mode.sh biren ${node_name}"
+        log_info "  恢复隔离     : sudo bash set-node-mode.sh none  ${node_name}"
+        log_info "════════════════════════════════════════════════════════"
+    fi
 }
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
