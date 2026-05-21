@@ -43,25 +43,26 @@
 ## 目录结构
 
 ```
-infer/llm/vllm/
-├── vllm_server.sh        # 容器内脚本：加载 conf → 查 registry → exec vllm
-├── run_docker.sh         # Docker 外层：GPU 选择 + 容器启动 + 健康轮询
-├── k8s_yaml_gen.sh       # k8s YAML 生成器：根据 conf 输出 YAML 到 k8s_yaml_gen/
-├── test_k8s.sh           # k8s 部署测试：apply YAML + 等待就绪 + API 测试 + 打印命令
-├── model_registry.conf   # 模型库：本地路径 + HuggingFace/ModelScope ID
-├── configs/
-│   ├── bge-m3.conf         # bge-m3（embedding，端口 28800，k8s NodePort 30800）
-│   ├── qwen3-32b.conf      # Qwen3-32B（chat，端口 28800，k8s NodePort 30801）
-│   └── minimax-m2.5.conf   # MiniMax M2.5（chat MoE，INT8，端口 20027，k8s NodePort 30802）
-├── quant/                # 权重量化工具
-│   ├── run_quant.sh        # 一键量化：FP8 → BF16 → INT8（在 BirenTech 容器内运行）
-│   ├── cast_fp8_bf16.py    # Stage 1：FP8 safetensors → BF16
-│   ├── convert-to-compressed.py  # Stage 2：BF16 → INT8 packed（torchrun 分布式）
-│   └── utils.py            # 量化辅助函数
-├── k8s_yaml_gen/         # 生成的 k8s YAML（临时文件，可按需修改后应用）
-│   ├── bge-m3.yaml
-│   └── qwen3-32b.yaml
-└── logs/                 # 启动 / 量化日志（自动生成）
+infer/llm/
+├── model_registry.conf   # 模型库：本地路径 + HuggingFace/ModelScope ID（多框架共享）
+└── vllm/
+    ├── vllm_server.sh        # 容器内脚本：加载 conf → 查 registry → exec vllm
+    ├── run_docker.sh         # Docker 外层：GPU 选择 + 容器启动 + 健康轮询
+    ├── k8s_yaml_gen.sh       # k8s YAML 生成器：根据 conf 输出 YAML 到 k8s_yaml_gen/
+    ├── test_k8s.sh           # k8s 部署测试：apply YAML + 等待就绪 + API 测试 + 打印命令
+    ├── configs/
+    │   ├── bge-m3.conf         # bge-m3（embedding，端口 28800，k8s NodePort 30800）
+    │   ├── qwen3-32b.conf      # Qwen3-32B（chat，端口 28800，k8s NodePort 30801）
+    │   └── minimax-m2.5.conf   # MiniMax M2.5（chat MoE，INT8，端口 20027，k8s NodePort 30802）
+    ├── quant/                # 权重量化工具
+    │   ├── run_quant.sh        # 一键量化：FP8 → BF16 → INT8（在 BirenTech 容器内运行）
+    │   ├── cast_fp8_bf16.py    # Stage 1：FP8 safetensors → BF16
+    │   ├── convert-to-compressed.py  # Stage 2：BF16 → INT8 packed（torchrun 分布式）
+    │   └── utils.py            # 量化辅助函数
+    ├── k8s_yaml_gen/         # 生成的 k8s YAML（临时文件，可按需修改后应用）
+    │   ├── bge-m3.yaml
+    │   └── qwen3-32b.yaml
+    └── logs/                 # 启动 / 量化日志（自动生成）
 ```
 
 ---
@@ -286,7 +287,7 @@ k8s_nodeport=30800             # NodePort 端口（k8s_yaml_gen.sh 必填）
 k8s_node_name=                 # 指定 k8s 节点；空 = 自动探测
 ```
 
-### 3.2 模型库（`model_registry.conf`）
+### 3.2 模型库（`infer/llm/model_registry.conf`）
 
 ```ini
 [bge-m3]
@@ -305,7 +306,7 @@ modelscope_id=Qwen/Qwen3-32B
 ## 四、新增模型
 
 ```bash
-# 1. 在 model_registry.conf 添加条目
+# 1. 在 infer/llm/model_registry.conf 添加条目
 # 2. 复制并修改 conf 文件
 cp configs/qwen3-32b.conf configs/my-model.conf
 # 修改 model_weights、port、tp/pp、k8s_nodeport

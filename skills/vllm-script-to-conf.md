@@ -1,13 +1,13 @@
 ---
 name: vllm-script-to-conf
-description: Convert a raw vLLM launch script (start_<model>.sh) into a structured conf file under infer/llm/vllm/configs/ and update model_registry.conf if needed. Read this skill before performing any such conversion.
+description: Convert a raw vLLM launch script (start_<model>.sh) into a structured conf file under infer/llm/vllm/configs/ and update infer/llm/model_registry.conf if needed. Read this skill before performing any such conversion.
 metadata:
   type: skill
   tags: [vllm, config, migration, inference, birentech]
   related_files:
     - infer/llm/vllm/configs/bge-m3.conf
     - infer/llm/vllm/configs/qwen3-32b.conf
-    - infer/llm/vllm/model_registry.conf
+    - infer/llm/model_registry.conf
     - infer/llm/vllm/vllm_server.sh
 ---
 
@@ -22,7 +22,7 @@ metadata:
 | 脚本中的内容 | conf 字段 | 说明 |
 |------------|---------|------|
 | `--port <n>` | `port=<n>` | 服务监听端口 |
-| `--model <path>` | `model_weights=<key>` | 用路径在 `model_registry.conf` 中查找 section 名；见第 2 节 |
+| `--model <path>` | `model_weights=<key>` | 用路径在 `infer/llm/model_registry.conf` 中查找 section 名；见第 2 节 |
 | `--served_model_name <name>` | `served_model_name=<name>` | 缺失则留空 |
 | `--task <type>` | `task=<type>` | embed 模型必须设为 `embed`；对话模型留空 |
 | `--dtype <type>` | `dtype=<type>` | |
@@ -58,11 +58,11 @@ metadata:
 
 ## 2 — 确定 model_weights 键名
 
-`model_weights` 是 `model_registry.conf` 中的 section 名称（`[...]`），不是路径。
+`model_weights` 是 `infer/llm/model_registry.conf` 中的 section 名称（`[...]`），不是路径。
 
 **步骤：**
 1. 从 `--model <path>` 取出路径，例如 `/data/models/BAAI/bge-m3`
-2. 读取 `infer/llm/vllm/model_registry.conf`，在 `local_path` 字段中匹配该路径
+2. 读取 `infer/llm/model_registry.conf`，在 `local_path` 字段中匹配该路径
 3. 找到对应的 section 名作为 `model_weights` 的值
 
 **若路径未在 registry 中登记**，需先追加一个新 section：

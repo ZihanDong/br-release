@@ -23,7 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-MODEL_REGISTRY="${SCRIPT_DIR}/model_registry.conf"
+MODEL_REGISTRY="${SCRIPT_DIR}/../model_registry.conf"
 LOG_DIR="${SCRIPT_DIR}/logs"
 CONTAINER_IMAGE='birensupa-smartinfer-vllm:26.05.14-py310-pt2.8.0-br1xx'
 

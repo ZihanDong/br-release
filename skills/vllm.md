@@ -9,7 +9,7 @@ metadata:
     - infer/llm/vllm/run_docker.sh
     - infer/llm/vllm/k8s_yaml_gen.sh
     - infer/llm/vllm/test_k8s.sh
-    - infer/llm/vllm/model_registry.conf
+    - infer/llm/model_registry.conf
     - infer/llm/vllm/configs/bge-m3.conf
     - infer/llm/vllm/configs/qwen3-32b.conf
     - infer/llm/vllm/configs/minimax-m2.5.conf
@@ -26,7 +26,7 @@ metadata:
 | `run_docker.sh` | 宿主机 | GPU 选择（brsmi）+ `docker run` + 健康轮询 |
 | `k8s_yaml_gen.sh` | 宿主机 | 生成 k8s YAML 到 `k8s_yaml_gen/<model>.yaml`，不执行 apply |
 | `test_k8s.sh` | 宿主机 | `kubectl apply <yaml>` + 等待 Ready + API 测试 + 打印命令 |
-| `model_registry.conf` | — | 模型库：本地权重路径 + HF/MS 下载 ID |
+| `../model_registry.conf` | — | 模型库：本地权重路径 + HF/MS 下载 ID（位于 `infer/llm/`，多框架共享） |
 | `configs/<model>.conf` | — | 每个模型的运行参数；Docker 和 k8s 共用同一套配置 |
 
 **架构原则：**
@@ -243,7 +243,7 @@ kubectl delete namespace vllm   # 全部清理
 
 **所需 GPU 数 = `tensor_parallel_size × pipeline_parallel_size`**
 
-### 3.2 `model_registry.conf` 格式
+### 3.2 `infer/llm/model_registry.conf` 格式
 
 ```ini
 [<model_name>]

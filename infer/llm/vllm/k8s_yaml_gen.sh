@@ -18,7 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-MODEL_REGISTRY="${SCRIPT_DIR}/model_registry.conf"
+MODEL_REGISTRY="${SCRIPT_DIR}/../model_registry.conf"
 CONTAINER_IMAGE='10.49.4.248:32000/infer/birensupa-smartinfer-vllm:26.05.14-py310-pt2.8.0-br1xx'
 K8S_NAMESPACE='vllm'
 YAML_DIR="${SCRIPT_DIR}/k8s_yaml_gen"

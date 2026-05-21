@@ -12,7 +12,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODEL_REGISTRY="${SCRIPT_DIR}/model_registry.conf"
+MODEL_REGISTRY="${SCRIPT_DIR}/../model_registry.conf"
 
 _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
 _ok()   { echo -e "\033[1;32m[ OK ]\033[0m  $*"; }
