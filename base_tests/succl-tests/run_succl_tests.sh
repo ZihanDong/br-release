@@ -356,10 +356,11 @@ process_section() {
     s_step_bytes=$( ini_get "$conf_file" "$section" "step_bytes"  "0")
     s_step_factor=$(ini_get "$conf_file" "$section" "step_factor" "2")
 
-    # ── Per-section iter/warmup overrides (optional; fall back to general.conf) ──
-    local s_iters s_warmup_iters
+    # ── Per-section overrides (optional; fall back to general.conf values) ────────
+    local s_iters s_warmup_iters s_check
     s_iters=$(       ini_get "$conf_file" "$section" "iters"        "$ITERS")
     s_warmup_iters=$(ini_get "$conf_file" "$section" "warmup_iters" "$WARMUP_ITERS")
+    s_check=$(       ini_get "$conf_file" "$section" "check"        "$CHECK")
 
     # ── Resolve ops list ──────────────────────────────────────────────────────
     local -a run_ops=()
@@ -390,7 +391,7 @@ process_section() {
         -m "$AGG_ITERS"
         -a "$AVERAGE"
         -p "$PARALLEL_INIT"
-        -c "$CHECK"
+        -c "$s_check"
         -z "$BLOCKING"
     )
     # §3.3.2: step mode (stepbytes takes precedence when > 0)
@@ -473,8 +474,12 @@ process_section() {
 ${mpi_env_args[*]} \
 ${bin_path} ${succl_args[*]}"
         else
+            # oob_tcp_if_include ensures orted back-channel also uses the same iface
+            local oob_arg=""
+            [[ -n "$MPI_IFACE_INCLUDE" ]] && oob_arg="--mca oob_tcp_if_include ${MPI_IFACE_INCLUDE}"
             CURR_INNER_CMD="mpiexec --allow-run-as-root \
 --mca pml ^ucx \
+${oob_arg} \
 ${mpi_iface_arg} \
 --mca plm_rsh_args \"-p ${SSH_PORT} -o StrictHostKeyChecking=no\" \
 --host ${mpi_hosts_str} \
