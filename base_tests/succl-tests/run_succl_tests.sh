@@ -2,123 +2,140 @@
 # run_succl_tests.sh — 在 biren_succl_tests 容器内执行 succl-tests 通信性能测试
 #
 # 用法:
-#   ./run_succl_tests.sh [-v] <mode> <op> <gpus>
+#   ./run_succl_tests.sh [-v] --config <run.conf> [--config <run2.conf> ...]
+#                        [--general <general.conf>] [--multi-config <multi-node.conf>]
 #
 # 参数说明:
-#   -v      可选。详细模式：测试输出同时打印到终端和日志文件
-#   mode    single | multi
-#             single: 单节点，所有 GPU 在同一容器内
-#             multi : 多节点，通过 mpiexec + SSH 免密跨容器调度
-#   op      算子名称，支持:
-#             allreduce | allgather | alltoall | alltoallv | broadcast |
-#             gather | hypercube | reduce | reducescatter | scatter | sendrecv
-#             all  — 依次执行以上全部算子
-#   gpus    GPU 数量（single: 本节点总卡数；multi: 每节点卡数）
+#   -v                    可选。详细模式：测试输出同时打印到终端和日志文件
+#   --config <file>       必填，可重复。运行配置文件（INI 格式，每个 [section] 为一组测试）
+#   --general <file>      可选。通用配置文件（默认: <script_dir>/configs/general.conf）
+#   --multi-config <file> 可选。多节点配置文件（默认: <script_dir>/configs/multi-node.conf）
 #
-# 示例:
-#   ./run_succl_tests.sh single allreduce 8       # 单节点 allreduce，8 卡
-#   ./run_succl_tests.sh -v single all 8          # 单节点全算子，终端实时输出
-#   ./run_succl_tests.sh multi allreduce 8        # 多节点 allreduce，每节点 8 卡
+# 运行配置文件格式（每个 [section] 定义一组测试）:
+#   [section_name]
+#   mode        = single | multi
+#   ops         = allreduce [allgather ...] | all
+#   gpus        = <int>        # single: 本节点总卡数; multi: 每节点卡数
+#   min_bytes   = 512          # 可选，覆盖默认值
+#   max_bytes   = 1G           # 可选，覆盖默认值
+#   step_bytes  = 0            # 可选，0=使用 step_factor
+#   step_factor = 2            # 可选
 #
 # 日志:
 #   每次运行在 LOG_PATH 下创建 succl-tests_<时间戳>/ 目录，包含:
-#     <op>.log      — 首行为完整执行命令，其后为测试全量输出
-#     summary.log   — 汇总各算子结果及峰值带宽（AlgBW / BusBW / 数据量 / 精度）
+#     <section>_<op>.log  — 首行为完整执行命令，其后为测试全量输出
+#     <section>_<op>.sh   — 可直接执行的等价 shell 脚本（在本机运行即可）
+#     summary.log         — 汇总各组各算子结果及峰值带宽
 #
 # 前提条件:
 #   已通过 setup_succl-tests.sh 完成容器初始化（/etc/succl-hw.conf 需存在）
-#
-# 多节点附加配置（脚本顶部变量）:
-#   MPI_HOSTS   必填，格式: "<ip1>:<slots>,<ip2>:<slots>"，如 "10.9.1.10:8,10.9.1.11:8"
-#   MPI_IFACE   MPI TCP 网卡，留空则排除 lo，或填具体网卡名如 "ens110f0"
-#   SSH_PORT    与 setup_succl-tests.sh 中配置一致（默认 2222）
-#   ./run_succl_tests.sh multi allreduce 8
 set -euo pipefail
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Default variables — edit these to match your environment
+# Fixed settings — do not expose to config files
 # ═══════════════════════════════════════════════════════════════════════════════
 
 CONTAINER_NAME="biren_succl_tests"
 SUCCL_BIN_DIR="/opt/succl-tests/bin"
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-# Override via: LOG_PATH=/your/path ./run_succl_tests.sh ...
+# §3.3.1: nthreads(-t) 和 ngpus(-G) 仅支持1，写死在此处不透传到配置文件
+readonly FIXED_NTHREADS=1
+readonly FIXED_NGPUS=1
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_PATH="${LOG_PATH:-${SCRIPT_DIR}/../../logs/succl-tests}"
 
-# ── Data range ────────────────────────────────────────────────────────────────
-MIN_BYTES="512"         # minimum message size in bytes; must be 512-aligned
-MAX_BYTES="1G"          # maximum message size; e.g. 512, 1M, 4G
-STEP_FACTOR="2"         # size multiplier between steps (used when STEP_BYTES=0)
-STEP_BYTES="0"          # fixed byte increment between steps; 0 = use STEP_FACTOR
+# ═══════════════════════════════════════════════════════════════════════════════
+# General config defaults (overridden by general.conf)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# ── suCCL operation parameters ────────────────────────────────────────────────
-REDUCE_OP="sum"         # reduce op for AllReduce/Reduce/ReduceScatter: sum|prod|min|max|avg|all
-DATATYPE="float"        # data type: float | BF16
-
-# ── Performance parameters ────────────────────────────────────────────────────
-ITERS="3"               # timed iteration count; keep small to avoid OOM (range: 1–20)
-WARMUP_ITERS="3"        # warmup iterations, not timed (range: 0–10)
-AGG_ITERS="1"           # operations aggregated per iteration (range: 1–N)
-AVERAGE="1"             # bandwidth reporting: 0=Rank0 1=Avg 2=Min 3=Max
-
-# ── Correctness check ─────────────────────────────────────────────────────────
-CHECK="1"               # verify results: 0=skip (faster) | 1=check (may be slow with many GPUs)
-
-# ── Misc test options ─────────────────────────────────────────────────────────
-BLOCKING="0"            # blocking mode: 0=async | 1=blocking
-BR_P2P_CHECK="0"        # BR_UMD_DEBUG_P2P_ACCESS_CHECK: 0=disabled (required for 壁砺106B/C)
-
-# ── BR166-specific ────────────────────────────────────────────────────────────
-# "auto" reads GPU_MODEL from /etc/succl-hw.conf written by setup_succl-tests.sh;
-# override with 0 or 1 to force-disable or force-enable BR166 UMA16 mode (-k 1)
+# §3.3.3 suCCL 操作参数
+REDUCE_OP="sum"
+DATATYPE="float"
+ROOT="0"
+# §3.3.4 性能相关参数
+ITERS="3"
+WARMUP_ITERS="3"
+AGG_ITERS="1"
+AVERAGE="1"
+# §3.3.5 测试选项
+PARALLEL_INIT="0"
+CHECK="1"
+BLOCKING="0"
+SUPAGRAPH="0"
+# 硬件相关
+BR_P2P_CHECK="0"
 BR166_MODE="auto"
 
-# ── Multi-node settings (ignored in single mode) ──────────────────────────────
-SSH_PORT="2222"                         # sshd port configured in each container
-MPI_IFACE=""                            # network interface for MPI TCP transport;
-                                        #   leave empty to auto-exclude lo only
-                                        #   example: "ens110f0"
-# Host list: comma-separated <ip>:<slots> pairs; slots = GPUs per node
-# Example: "10.9.1.10:8,10.9.1.11:8"
-MPI_HOSTS=""
+# ═══════════════════════════════════════════════════════════════════════════════
+# Multi-node config defaults (overridden by multi-node.conf)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# SUCCL_BUFFSIZE: required for 4+ nodes with SendRecv/Gather/Scatter/Hypercube/
-#   Alltoall/Alltoallv to reach max data size; set to 16777216 (16 MB) if needed
-SUCCL_BUFFSIZE=""       # e.g. "16777216"; leave empty to use library default
+SSH_PORT="2222"
+MPI_IFACE_INCLUDE=""
+MPI_IFACE_EXCLUDE="lo"
+SUCCL_BUFFSIZE=""
+MULTI_NODE_IPS=()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Argument parsing
 # ═══════════════════════════════════════════════════════════════════════════════
 
 usage() {
-    grep '^# ' "$0" | head -14 | sed 's/^# \?//'
+    grep '^# ' "$0" | head -22 | sed 's/^# \?//'
     exit 1
 }
 
 VERBOSE=0
-if [[ "${1:-}" == "-v" ]]; then
-    VERBOSE=1
-    shift
+GENERAL_CONF="${SCRIPT_DIR}/configs/general.conf"
+MULTI_CONF="${SCRIPT_DIR}/configs/multi-node.conf"
+RUN_CONFIGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -v)               VERBOSE=1; shift ;;
+        --config)         [[ $# -lt 2 ]] && { echo "ERROR: --config requires a file argument"; exit 1; }
+                          RUN_CONFIGS+=("$2"); shift 2 ;;
+        --general)        [[ $# -lt 2 ]] && { echo "ERROR: --general requires a file argument"; exit 1; }
+                          GENERAL_CONF="$2"; shift 2 ;;
+        --multi-config)   [[ $# -lt 2 ]] && { echo "ERROR: --multi-config requires a file argument"; exit 1; }
+                          MULTI_CONF="$2"; shift 2 ;;
+        -h|--help)        usage ;;
+        *)                echo "ERROR: unknown argument: $1" >&2; usage ;;
+    esac
+done
+
+[[ ${#RUN_CONFIGS[@]} -eq 0 ]] && {
+    echo "ERROR: at least one --config <file> is required." >&2
+    usage
+}
+
+# ─── Load general config ──────────────────────────────────────────────────────
+[[ -f "$GENERAL_CONF" ]] || {
+    echo "ERROR: general config not found: $GENERAL_CONF" >&2
+    exit 1
+}
+# shellcheck source=/dev/null
+source "$GENERAL_CONF"
+
+# ─── Load multi-node config (optional at startup; required when mode=multi) ───
+MULTI_CONF_LOADED=0
+if [[ -f "$MULTI_CONF" ]]; then
+    # shellcheck source=/dev/null
+    source "$MULTI_CONF"
+    MULTI_CONF_LOADED=1
 fi
 
-[[ $# -ne 3 ]] && { echo "ERROR: expected exactly 3 arguments (after optional -v)."; usage; }
+# ─── Validate run config files exist ─────────────────────────────────────────
+for conf in "${RUN_CONFIGS[@]}"; do
+    [[ -f "$conf" ]] || { echo "ERROR: run config not found: $conf" >&2; exit 1; }
+done
 
-MODE="$1"
-OP="$2"
-GPUS="$3"
+# ═══════════════════════════════════════════════════════════════════════════════
+# Operator → binary mapping
+# ═══════════════════════════════════════════════════════════════════════════════
 
-case "$MODE" in
-    single|multi) ;;
-    *) echo "ERROR: mode must be 'single' or 'multi', got: $MODE"; usage ;;
-esac
-
-if ! [[ "$GPUS" =~ ^[0-9]+$ ]] || [[ "$GPUS" -lt 1 ]]; then
-    echo "ERROR: gpus must be a positive integer, got: $GPUS"; exit 1
-fi
-
-# Map operator name → binary
 declare -A OP_BINARY=(
     [allreduce]="all_reduce_perf"
     [allgather]="all_gather_perf"
@@ -132,36 +149,53 @@ declare -A OP_BINARY=(
     [scatter]="scatter_perf"
     [sendrecv]="sendrecv_perf"
 )
-
 ALL_OPS=(allreduce allgather alltoall alltoallv broadcast gather hypercube reduce reducescatter scatter sendrecv)
 
-if [[ "$OP" == "all" ]]; then
-    RUN_OPS=("${ALL_OPS[@]}")
-elif [[ -v OP_BINARY["$OP"] ]]; then
-    RUN_OPS=("$OP")
-else
-    echo "ERROR: unknown operator '$OP'. Valid: all ${ALL_OPS[*]}"
-    exit 1
-fi
+# ═══════════════════════════════════════════════════════════════════════════════
+# INI config parsing helpers
+# ═══════════════════════════════════════════════════════════════════════════════
 
-if [[ "$MODE" == "multi" && -z "$MPI_HOSTS" ]]; then
-    echo "ERROR: MPI_HOSTS must be set for multi-node mode." >&2
-    echo "  Edit the MPI_HOSTS variable at the top of this script." >&2
-    exit 1
-fi
+# List all [section] names in an INI file, one per line
+ini_sections() {
+    grep -E '^\[[^]]+\]' "$1" | sed 's/^\[//;s/\]//'
+}
+
+# Get the value of key within a named section; print $default if not found
+ini_get() {
+    local file="$1" section="$2" key="$3" default="${4:-}"
+    local val
+    val=$(awk -v sec="[$section]" -v k="$key" '
+        $0 == sec       { in_s=1; next }
+        in_s && /^\[/   { in_s=0 }
+        in_s {
+            sub(/#.*/, "")
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+            if (!length($0)) next
+            eq = index($0, "=")
+            if (eq > 0) {
+                lhs = substr($0, 1, eq-1)
+                gsub(/[[:space:]]/, "", lhs)
+                if (lhs == k) {
+                    val = substr($0, eq+1)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+                    print val; exit
+                }
+            }
+        }
+    ' "$file")
+    echo "${val:-$default}"
+}
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Logging setup
+# Logging helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_DIR="${LOG_PATH}/succl-tests_${TIMESTAMP}"
 mkdir -p "$LOG_DIR"
 
-# Helper: append command output to file, optionally also to terminal
 log_run() {
-    local log_file="$1"
-    shift
+    local log_file="$1"; shift
     if [[ "$VERBOSE" -eq 1 ]]; then
         "$@" 2>&1 | tee -a "$log_file"
     else
@@ -169,20 +203,17 @@ log_run() {
     fi
 }
 
-# Parse the peak out-of-place AlgBW row from a succl-tests log file.
-# Outputs: "<size_human> <type> <algbw> GB/s  busbw <busbw> GB/s"
+# Parse peak out-of-place AlgBW from a succl-tests log file
 parse_peak_bw() {
     local log_file="$1"
     awk '
     BEGIN { algbw_col=0; busbw_col=0; max_algbw=-1 }
-    # Detect column positions from the header line that contains "Algbw"
     /^#.*Algbw/ && algbw_col==0 {
         for (i=1; i<=NF; i++) {
             if ($i=="Algbw" && algbw_col==0) algbw_col=i
             if ($i=="Busbw" && busbw_col==0) busbw_col=i
         }
     }
-    # Data lines — same column numbering as header (both have a leading symbol)
     /^\*/ && algbw_col>0 {
         val = $algbw_col+0
         if (val > max_algbw) {
@@ -194,7 +225,6 @@ parse_peak_bw() {
     }
     END {
         if (max_algbw < 0) { print "N/A"; exit }
-        # human-readable size
         if      (max_bytes >= 1073741824) size = sprintf("%.0f GiB", max_bytes/1073741824)
         else if (max_bytes >= 1048576)    size = sprintf("%.0f MiB", max_bytes/1048576)
         else if (max_bytes >= 1024)       size = sprintf("%.0f KiB", max_bytes/1024)
@@ -204,8 +234,6 @@ parse_peak_bw() {
     }
     ' "$log_file"
 }
-
-echo "Logs → ${LOG_DIR}"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Resolve BR166_MODE
@@ -224,109 +252,62 @@ if [[ "$BR166_MODE" == "auto" ]]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Build common succl-tests flags
+# Core: run one (section, op) test
 # ═══════════════════════════════════════════════════════════════════════════════
+#
+# Globals consumed (set by process_section before calling):
+#   CURR_INNER_CMD   — full mpiexec command string for bash -lc
+#   CURR_MODE        — single | multi
+#   CURR_GPUS        — GPU count
 
-SUCCL_ARGS=(
-    -b "$MIN_BYTES"
-    -e "$MAX_BYTES"
-    -d "$DATATYPE"
-    -o "$REDUCE_OP"
-    -n "$ITERS"
-    -w "$WARMUP_ITERS"
-    -m "$AGG_ITERS"
-    -a "$AVERAGE"
-    -c "$CHECK"
-    -z "$BLOCKING"
-)
-[[ "$STEP_BYTES" -gt 0 ]] && SUCCL_ARGS+=(-i "$STEP_BYTES") \
-                           || SUCCL_ARGS+=(-f "$STEP_FACTOR")
-[[ "$BR166_MODE" == "1" ]] && SUCCL_ARGS+=(-k 1)
-
-MPI_ENV_ARGS=(-x "BR_UMD_DEBUG_P2P_ACCESS_CHECK=${BR_P2P_CHECK}")
-[[ -n "$SUCCL_BUFFSIZE" ]] && MPI_ENV_ARGS+=(-x "SUCCL_BUFFSIZE=${SUCCL_BUFFSIZE}")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Run tests
-# ═══════════════════════════════════════════════════════════════════════════════
-
-run_op() {
-    local op="$1"
+run_section_op() {
+    local section="$1" op="$2"
     local binary="${OP_BINARY[$op]}"
-    local bin_path="${SUCCL_BIN_DIR}/${binary}"
-    local log_file="${LOG_DIR}/${op}.log"
+    local log_file="${LOG_DIR}/${section}_${op}.log"
+    local sh_file="${LOG_DIR}/${section}_${op}.sh"
 
-    # Build the full mpiexec command string for logging
-    local cmd
-    if [[ "$MODE" == "single" ]]; then
-        cmd="docker exec ${CONTAINER_NAME} bash -lc \
-\"mpiexec --allow-run-as-root -n ${GPUS} ${MPI_ENV_ARGS[*]} ${bin_path} ${SUCCL_ARGS[*]}\""
-    else
-        local iface_arg
-        if [[ -n "$MPI_IFACE" ]]; then
-            iface_arg="--mca btl_tcp_if_include ${MPI_IFACE}"
-        else
-            iface_arg="--mca btl_tcp_if_exclude lo"
-        fi
-        cmd="docker exec ${CONTAINER_NAME} bash -lc \
-\"mpiexec --allow-run-as-root --mca pml ^ucx ${iface_arg} \
---mca plm_rsh_args \\\"-p ${SSH_PORT}\\\" --host ${MPI_HOSTS} \
-${MPI_ENV_ARGS[*]} -x LD_LIBRARY_PATH ${bin_path} ${SUCCL_ARGS[*]}\""
-    fi
-
-    # Write log header — command on line 1, then metadata
+    # ── Write executable shell script BEFORE running ──────────────────────────
+    # Single-quote the inner command; our commands never contain single quotes.
     {
-        echo "# CMD: ${cmd}"
+        printf '#!/usr/bin/env bash\n'
+        printf '# Generated: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf '# section=%s  op=%s  mode=%s  gpus=%s\n' \
+            "$section" "$op" "$CURR_MODE" "$CURR_GPUS"
+        printf '\n'
+        printf "docker exec %s bash -lc '%s'\n" "$CONTAINER_NAME" "$CURR_INNER_CMD"
+    } > "$sh_file"
+    chmod +x "$sh_file"
+
+    # ── Write log header (CMD on first line per existing convention) ───────────
+    {
+        echo "# CMD: docker exec ${CONTAINER_NAME} bash -lc '${CURR_INNER_CMD}'"
         echo "# ================================================================"
-        echo "# operator : ${op}"
-        echo "# binary   : ${binary}"
-        echo "# mode     : ${MODE}   gpus: ${GPUS}"
+        echo "# section  : ${section}"
+        echo "# operator : ${op}  binary: ${binary}"
+        echo "# mode     : ${CURR_MODE}  gpus: ${CURR_GPUS}"
         echo "# started  : $(date '+%Y-%m-%d %H:%M:%S')"
         echo "# ================================================================"
         echo ""
     } > "$log_file"
 
-    local status_msg
+    # ── Terminal output ───────────────────────────────────────────────────────
     if [[ "$VERBOSE" -eq 1 ]]; then
         echo ""
-        echo "━━━ ${op} ━━━"
-        echo "CMD: ${cmd}"
+        echo "━━━ [${section}] ${op} ━━━"
+        echo "CMD: docker exec ${CONTAINER_NAME} bash -lc '${CURR_INNER_CMD}'"
         echo ""
     else
-        printf "  %-16s → %s  " "$op" "$log_file"
+        printf "  %-16s → %s  " "$op" "$(basename "$log_file")"
     fi
 
+    # ── Execute ───────────────────────────────────────────────────────────────
     local rc=0
-    if [[ "$MODE" == "single" ]]; then
-        log_run "$log_file" \
-            docker exec "$CONTAINER_NAME" bash -lc \
-            "mpiexec --allow-run-as-root \
-             -n ${GPUS} \
-             ${MPI_ENV_ARGS[*]} \
-             ${bin_path} ${SUCCL_ARGS[*]}" || rc=$?
-    else
-        local iface_arg
-        if [[ -n "$MPI_IFACE" ]]; then
-            iface_arg="--mca btl_tcp_if_include ${MPI_IFACE}"
-        else
-            iface_arg="--mca btl_tcp_if_exclude lo"
-        fi
-        log_run "$log_file" \
-            docker exec "$CONTAINER_NAME" bash -lc \
-            "mpiexec --allow-run-as-root \
-             --mca pml ^ucx \
-             ${iface_arg} \
-             --mca plm_rsh_args \"-p ${SSH_PORT}\" \
-             --host ${MPI_HOSTS} \
-             ${MPI_ENV_ARGS[*]} \
-             -x LD_LIBRARY_PATH \
-             ${bin_path} ${SUCCL_ARGS[*]}" || rc=$?
-    fi
+    log_run "$log_file" \
+        docker exec "$CONTAINER_NAME" bash -lc "$CURR_INNER_CMD" || rc=$?
 
-    # Append finish timestamp and status to log
     {
         echo ""
-        echo "# finished : $(date '+%Y-%m-%d %H:%M:%S')   exit_code: ${rc}"
+        echo "# finished : $(date '+%Y-%m-%d %H:%M:%S')  exit_code: ${rc}"
     } >> "$log_file"
 
     if [[ "$VERBOSE" -eq 0 ]]; then
@@ -336,39 +317,228 @@ ${MPI_ENV_ARGS[*]} -x LD_LIBRARY_PATH ${bin_path} ${SUCCL_ARGS[*]}\""
     return $rc
 }
 
-# ─── Header summary ───────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Core: process one [section] from a run config file
+# ═══════════════════════════════════════════════════════════════════════════════
+
+process_section() {
+    local conf_file="$1" section="$2"
+
+    # ── Validate section name (used in filenames) ─────────────────────────────
+    if [[ ! "$section" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        echo "ERROR: [${section}] — section name must match [A-Za-z0-9_-]" >&2
+        return 1
+    fi
+
+    # ── Read required fields ──────────────────────────────────────────────────
+    local s_mode s_ops s_gpus
+    s_mode=$(ini_get "$conf_file" "$section" "mode" "")
+    s_ops=$(ini_get  "$conf_file" "$section" "ops"  "")
+    s_gpus=$(ini_get "$conf_file" "$section" "gpus" "")
+
+    [[ -z "$s_mode" ]] && { echo "ERROR: [${section}] missing required field 'mode'" >&2; return 1; }
+    [[ -z "$s_ops"  ]] && { echo "ERROR: [${section}] missing required field 'ops'"  >&2; return 1; }
+    [[ -z "$s_gpus" ]] && { echo "ERROR: [${section}] missing required field 'gpus'" >&2; return 1; }
+
+    [[ "$s_mode" != "single" && "$s_mode" != "multi" ]] && {
+        echo "ERROR: [${section}] mode must be 'single' or 'multi', got: '${s_mode}'" >&2
+        return 1
+    }
+    [[ ! "$s_gpus" =~ ^[0-9]+$ || "$s_gpus" -lt 1 ]] && {
+        echo "ERROR: [${section}] gpus must be a positive integer, got: '${s_gpus}'" >&2
+        return 1
+    }
+
+    # ── Read §3.3.2 data range (optional, with defaults) ──────────────────────
+    local s_min_bytes s_max_bytes s_step_bytes s_step_factor
+    s_min_bytes=$(  ini_get "$conf_file" "$section" "min_bytes"   "512")
+    s_max_bytes=$(  ini_get "$conf_file" "$section" "max_bytes"   "1G")
+    s_step_bytes=$( ini_get "$conf_file" "$section" "step_bytes"  "0")
+    s_step_factor=$(ini_get "$conf_file" "$section" "step_factor" "2")
+
+    # ── Resolve ops list ──────────────────────────────────────────────────────
+    local -a run_ops=()
+    if [[ "$s_ops" == "all" ]]; then
+        run_ops=("${ALL_OPS[@]}")
+    else
+        for op in $s_ops; do
+            if [[ ! -v OP_BINARY["$op"] ]]; then
+                echo "ERROR: [${section}] unknown operator '${op}'. Valid: all ${ALL_OPS[*]}" >&2
+                return 1
+            fi
+            run_ops+=("$op")
+        done
+    fi
+
+    # ── Build succl-tests binary argument list ────────────────────────────────
+    # §3.3.1: -t (nthreads) and -G (ngpus) are hardcoded to 1 ("仅支持1")
+    local -a succl_args=(
+        -t "$FIXED_NTHREADS"
+        -G "$FIXED_NGPUS"
+        -b "$s_min_bytes"
+        -e "$s_max_bytes"
+        -o "$REDUCE_OP"
+        -d "$DATATYPE"
+        -r "$ROOT"
+        -n "$ITERS"
+        -w "$WARMUP_ITERS"
+        -m "$AGG_ITERS"
+        -a "$AVERAGE"
+        -p "$PARALLEL_INIT"
+        -c "$CHECK"
+        -z "$BLOCKING"
+    )
+    # §3.3.2: step mode (stepbytes takes precedence when > 0)
+    [[ "$s_step_bytes" -gt 0 ]] && succl_args+=(-i "$s_step_bytes") \
+                                 || succl_args+=(-f "$s_step_factor")
+    # BR166 UMA16 mode
+    [[ "$BR166_MODE" == "1" ]] && succl_args+=(-k 1)
+    # SUPA Graph capture
+    [[ "$SUPAGRAPH" != "0" ]] && succl_args+=(--supagraph "$SUPAGRAPH")
+
+    # ── Build MPI environment args ────────────────────────────────────────────
+    local -a mpi_env_args=(-x "BR_UMD_DEBUG_P2P_ACCESS_CHECK=${BR_P2P_CHECK}")
+    [[ -n "$SUCCL_BUFFSIZE" ]] && mpi_env_args+=(-x "SUCCL_BUFFSIZE=${SUCCL_BUFFSIZE}")
+
+    # ── Multi-node: validate config and build host string ─────────────────────
+    local mpi_iface_arg="" mpi_hosts_str=""
+    if [[ "$s_mode" == "multi" ]]; then
+        if [[ "$MULTI_CONF_LOADED" -eq 0 ]]; then
+            echo "ERROR: [${section}] mode=multi but multi-node config not found: ${MULTI_CONF}" >&2
+            echo "  Please create ${MULTI_CONF} or specify --multi-config <file>" >&2
+            return 1
+        fi
+        if [[ ${#MULTI_NODE_IPS[@]} -lt 1 ]]; then
+            echo "ERROR: [${section}] MULTI_NODE_IPS is empty in ${MULTI_CONF}" >&2
+            return 1
+        fi
+
+        # Build --host string: IP1:gpus,IP2:gpus,...
+        local hosts_str=""
+        for ip in "${MULTI_NODE_IPS[@]}"; do
+            [[ -n "$hosts_str" ]] && hosts_str+=","
+            hosts_str+="${ip}:${s_gpus}"
+        done
+        mpi_hosts_str="$hosts_str"
+
+        # Network interface arg (INCLUDE takes precedence over EXCLUDE)
+        if [[ -n "$MPI_IFACE_INCLUDE" ]]; then
+            mpi_iface_arg="--mca btl_tcp_if_include ${MPI_IFACE_INCLUDE}"
+        elif [[ -n "$MPI_IFACE_EXCLUDE" ]]; then
+            mpi_iface_arg="--mca btl_tcp_if_exclude ${MPI_IFACE_EXCLUDE}"
+        fi
+    fi
+
+    # ── Section header ────────────────────────────────────────────────────────
+    echo ""
+    echo "──── [${section}]  mode=${s_mode}  ops=${s_ops}  gpus=${s_gpus} ────"
+    printf "\n[%s]  mode=%s  gpus=%s\n" "$section" "$s_mode" "$s_gpus" >> "$SUMMARY_FILE"
+
+    # ── Run each op ───────────────────────────────────────────────────────────
+    local failed_ops=()
+    for op in "${run_ops[@]}"; do
+        local bin_path="${SUCCL_BIN_DIR}/${OP_BINARY[$op]}"
+
+        # Set CURR_* globals consumed by run_section_op
+        CURR_MODE="$s_mode"
+        CURR_GPUS="$s_gpus"
+
+        if [[ "$s_mode" == "single" ]]; then
+            CURR_INNER_CMD="mpiexec --allow-run-as-root \
+-n ${s_gpus} \
+${mpi_env_args[*]} \
+${bin_path} ${succl_args[*]}"
+        else
+            CURR_INNER_CMD="mpiexec --allow-run-as-root \
+--mca pml ^ucx \
+${mpi_iface_arg} \
+--mca plm_rsh_args \"-p ${SSH_PORT}\" \
+--host ${mpi_hosts_str} \
+${mpi_env_args[*]} \
+-x LD_LIBRARY_PATH \
+${bin_path} ${succl_args[*]}"
+        fi
+
+        run_section_op "$section" "$op" || failed_ops+=("$op")
+
+        local op_status
+        op_status=$([[ " ${failed_ops[*]:-} " == *" ${op} "* ]] && echo "FAILED" || echo "OK")
+        local peak=""
+        [[ "$op_status" == "OK" ]] && peak=$(parse_peak_bw "${LOG_DIR}/${section}_${op}.log")
+        printf "  %-16s %s   %s\n" "${op}:" "$op_status" "${peak:-—}" >> "$SUMMARY_FILE"
+    done
+
+    # Return non-zero if any op failed
+    [[ ${#failed_ops[@]} -eq 0 ]]
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Summary file header
+# ═══════════════════════════════════════════════════════════════════════════════
+
 SUMMARY_FILE="${LOG_DIR}/summary.log"
 {
     echo "succl-tests run summary"
-    echo "started  : $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "mode     : ${MODE}   op: ${OP}   gpus: ${GPUS}"
-    echo "log_dir  : ${LOG_DIR}"
+    echo "started   : $(date '+%Y-%m-%d %H:%M:%S')"
+    printf "configs   : %s\n" "${RUN_CONFIGS[*]}"
+    echo "general   : ${GENERAL_CONF}"
+    echo "log_dir   : ${LOG_DIR}"
     echo ""
 } > "$SUMMARY_FILE"
 
-echo "=== succl-tests: mode=${MODE}  op=${OP}  gpus=${GPUS} ==="
+echo "Logs → ${LOG_DIR}"
+echo "=== succl-tests: configs=${RUN_CONFIGS[*]} ==="
 [[ "$VERBOSE" -eq 0 ]] && echo "  (run with -v to also show output on terminal)"
 
-FAILED_OPS=()
-for op in "${RUN_OPS[@]}"; do
-    run_op "$op" || FAILED_OPS+=("$op")
-    local_status=$( [[ " ${FAILED_OPS[*]} " == *" ${op} "* ]] && echo "FAILED" || echo "OK" )
-    peak=$( [[ "$local_status" == "OK" ]] && parse_peak_bw "${LOG_DIR}/${op}.log" || echo "—" )
-    printf "  %-16s %s   %s\n" "${op}:" "$local_status" "$peak" >> "$SUMMARY_FILE"
+# ═══════════════════════════════════════════════════════════════════════════════
+# Process all run config files and their sections
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Track globally failed sections across all config files
+FAILED_SECTIONS=()
+
+# Detect duplicate section names across all config files
+declare -A SEEN_SECTIONS=()
+
+for conf_file in "${RUN_CONFIGS[@]}"; do
+    echo ""
+    echo "════ Config: ${conf_file} ════"
+
+    sections=$(ini_sections "$conf_file")
+    if [[ -z "$sections" ]]; then
+        echo "WARNING: no [sections] found in ${conf_file}, skipping." >&2
+        continue
+    fi
+
+    while IFS= read -r section; do
+        [[ -z "$section" ]] && continue
+
+        # Duplicate section check
+        if [[ -v SEEN_SECTIONS["$section"] ]]; then
+            echo "ERROR: duplicate section name '${section}' (first seen in ${SEEN_SECTIONS[$section]}), skipping." >&2
+            continue
+        fi
+        SEEN_SECTIONS["$section"]="$conf_file"
+
+        process_section "$conf_file" "$section" || FAILED_SECTIONS+=("$section")
+    done <<< "$sections"
 done
 
-# ─── Final summary ────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Final summary
+# ═══════════════════════════════════════════════════════════════════════════════
+
 echo ""
 {
     echo ""
-    echo "finished : $(date '+%Y-%m-%d %H:%M:%S')"
-    if [[ ${#FAILED_OPS[@]} -eq 0 ]]; then
-        echo "result   : ALL PASSED"
+    echo "finished  : $(date '+%Y-%m-%d %H:%M:%S')"
+    if [[ ${#FAILED_SECTIONS[@]} -eq 0 ]]; then
+        echo "result    : ALL PASSED"
     else
-        echo "result   : FAILED ops: ${FAILED_OPS[*]}"
+        echo "result    : FAILED sections: ${FAILED_SECTIONS[*]}"
     fi
 } | tee -a "$SUMMARY_FILE"
 
 echo "Logs saved to: ${LOG_DIR}"
 
-[[ ${#FAILED_OPS[@]} -eq 0 ]]
+[[ ${#FAILED_SECTIONS[@]} -eq 0 ]]
