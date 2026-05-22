@@ -22,6 +22,9 @@ K8S_DIR="${SCRIPT_DIR}/../kubernets"
 : "${NODE_MODE:=biren}"              # biren | cpu | none
 : "${DEPLOY_REGISTRY:=true}"         # true | false
 : "${REGISTRY_CONF:=}"               # 默认使用 registry/registry.conf
+# 镜像加速地址：国内/Kylin 环境必填（registry.k8s.io 不可达）
+# 示例：registry.aliyuncs.com/google_containers
+: "${REGISTRY_MIRROR:=}"
 
 # ── 颜色输出 ───────────────────────────────────────────────────────────────────
 _info()  { echo -e "\033[0;32m[INFO]\033[0m  $*"; }
@@ -33,10 +36,10 @@ _step()  { echo; echo -e "\033[1;34m══════════════�
 [[ "$(id -u)" -eq 0 ]] || { echo "请以 root 身份运行（sudo）"; exit 1; }
 
 _step "Step 1/5: 安装 k8s 基础环境"
-K8S_VERSION="${K8S_VERSION}" bash "${K8S_DIR}/install.sh"
+K8S_VERSION="${K8S_VERSION}" REGISTRY_MIRROR="${REGISTRY_MIRROR}" bash "${K8S_DIR}/install.sh"
 
 _step "Step 2/5: 初始化控制面"
-K8S_VERSION="${K8S_VERSION}" bash "${K8S_DIR}/master.sh"
+K8S_VERSION="${K8S_VERSION}" REGISTRY_MIRROR="${REGISTRY_MIRROR}" bash "${K8S_DIR}/master.sh"
 
 _step "Step 3/5: 等待节点 Ready"
 export KUBECONFIG=/etc/kubernetes/admin.conf

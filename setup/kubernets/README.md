@@ -1,6 +1,11 @@
 # Kubernetes 自动化部署工具集
 
-面向 Ubuntu 20.04/22.04/24.04 及 Kylin V10/V11 的 Kubernetes 一键部署、节点管理、私有 Registry 和清理工具。支持 k8s ≥ v1.19，当前已在 k8s v1.30 + containerd v2 环境验证。
+面向 Ubuntu 20.04/22.04/24.04 及 Kylin V10/V11 的 Kubernetes 一键部署、节点管理、私有 Registry 和清理工具。支持 k8s ≥ v1.19，已在以下环境验证：
+
+| 平台 | k8s 版本 | 容器运行时 |
+|------|----------|-----------|
+| Ubuntu 22.04 | v1.30 | containerd v2 |
+| Kylin Linux Advanced Server V10 | v1.25.3 | containerd v1.7 |
 
 ---
 
@@ -8,18 +13,22 @@
 
 ```
 setup/kubernets/
-├── install.sh          # 节点基础环境安装（containerd + k8s 包）
-├── master.sh           # 控制面初始化（kubeadm init + CNI）
-├── join.sh             # 工作节点加入集群（支持 CPU / BirenTech GPU 模式）
-├── set-node-mode.sh    # 已加入节点的算力角色切换
-├── k8s_clean.sh        # 清除 k8s 全部组件，恢复安装前状态
-├── lib/                # 公共函数库（脚本内部使用）
-│   ├── common.sh
-│   ├── preflight.sh
-│   ├── container_runtime.sh
-│   ├── kubeadm.sh
-│   └── init_cluster.sh
-└── registry/           # 私有 Registry 管理
+├── install.sh              # 节点基础环境安装（containerd + k8s 包）
+├── master.sh               # 控制面初始化（kubeadm init + CNI）
+├── join.sh                 # 工作节点加入集群（支持 CPU / BirenTech GPU 模式）
+├── set-node-mode.sh        # 已加入节点的算力角色切换
+├── k8s_clean.sh            # 清除 k8s 全部组件，恢复安装前状态（Ubuntu + Kylin）
+├── k8s_clean-ubuntu.sh     # k8s_clean.sh 的前身，仅适用于 Ubuntu（归档保留）
+├── lib/                    # 公共函数库（脚本内部使用）
+│   ├── common.sh               # 通用工具函数（OS 检测、日志、版本比较等）
+│   ├── preflight-ubuntu.sh     # Ubuntu 预检（apt 依赖、ufw、内核模块等）
+│   ├── preflight-kylin.sh      # Kylin 预检（yum 依赖、firewalld、CNI bin 路径修复）
+│   ├── container_runtime-ubuntu.sh  # Ubuntu containerd 安装（apt/Docker CE repo）
+│   ├── container_runtime-kylin.sh   # Kylin containerd 配置（service 文件、config patch）
+│   ├── kubeadm-ubuntu.sh       # Ubuntu k8s 包安装（apt，新旧 pkgs.k8s.io 双通道）
+│   ├── kubeadm-kylin.sh        # Kylin k8s 包安装（yum，已安装则跳过）
+│   └── init_cluster.sh         # kubeadm init/join 公共逻辑（两个平台共用）
+└── registry/               # 私有 Registry 管理
     ├── setup-registry.sh   # 在 k8s 中部署私有 Registry
     ├── update_images.sh    # 镜像同步：比对 images.conf 与 Registry，支持 add/purge/conf_gen
     ├── registry-trust.sh   # 节点注入/移除 Registry 信任配置
@@ -28,6 +37,8 @@ setup/kubernets/
     └── images.conf         # 镜像路径配置（命名空间定义，供 update_images.sh 使用）
 ```
 
+**`install.sh` 会根据 `/etc/os-release` 自动检测 OS，并 source 对应的 `-ubuntu` 或 `-kylin` lib 文件。**
+
 ---
 
 ## 快速开始
@@ -35,13 +46,17 @@ setup/kubernets/
 ### 典型流程：单节点 Master + BirenTech GPU
 
 ```bash
+cd setup/kubernets
+
 # 1. 安装 k8s 基础环境
-sudo ./install.sh
+#    国内/内网环境推荐传入 REGISTRY_MIRROR（Kylin 环境必填）
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./install.sh
 
 # 2. 初始化控制面（初始为隔离状态）
-sudo ./master.sh
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./master.sh
 
 # 3. 将本机同时作为 BirenTech GPU 算力节点
+#    需要 packages/biren/ 目录内有 *.tar 镜像和 biren-device-plugin.yaml
 sudo ./set-node-mode.sh biren
 
 # 4. 部署私有 Registry
@@ -64,30 +79,36 @@ sudo ./registry/registry-trust.sh apply worker01,worker02
 
 **支持操作系统：** Ubuntu 20.04 / 22.04 / 24.04，Kylin V10 / V11
 
+脚本自动检测 OS 并 source 对应 lib 文件；无需手动区分平台。
+
 **环境变量（均可选）：**
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `K8S_VERSION` | `1.30` | 安装的 k8s 版本，支持 `1.28`、`1.28.5` 等格式 |
-| `REGISTRY_MIRROR` | 空 | 镜像加速地址，如 `registry.aliyuncs.com/google_containers` |
-| `CONTAINERD_VERSION` | 最新 | 固定 containerd 版本 |
+| `REGISTRY_MIRROR` | 空 | 镜像加速地址，如 `registry.aliyuncs.com/google_containers`<br>**Kylin/国内环境必填**（registry.k8s.io 不可达） |
+| `CONTAINERD_VERSION` | 最新 | 固定 containerd 版本（Ubuntu 专用；Kylin 若已有 containerd 则跳过安装） |
 | `CNI_PLUGIN` | `flannel` | CNI 插件：`flannel` / `calico` / `none` |
 
 **用法示例：**
 
 ```bash
-# 默认安装 k8s 1.30
+# 默认安装 k8s 1.30（Ubuntu，网络可达时）
 sudo ./install.sh
 
-# 指定版本，使用国内镜像加速
+# 指定版本，使用国内镜像加速（Ubuntu 或 Kylin）
 sudo K8S_VERSION=1.28 REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./install.sh
+
+# Kylin V10，已有 k8s 1.25.3 RPM，仅配置 containerd + 系统参数
+sudo K8S_VERSION=1.25 REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./install.sh
 ```
 
 **影响范围：**
-- 安装 containerd（若已存在则仅修补配置）
-- 安装 kubeadm / kubelet / kubectl（包版本锁定）
+- 安装 containerd（Ubuntu：通过 Docker CE apt 源；Kylin：若已安装则仅修补配置）
+- 安装 kubeadm / kubelet / kubectl（Ubuntu：apt + hold；Kylin：yum，已安装则跳过）
 - 写入 `/etc/modules-load.d/k8s.conf`（overlay、br_netfilter）
 - 写入 `/etc/sysctl.d/99-k8s.conf`（bridge-nf、ip_forward）
+- Kylin：将 `/usr/libexec/cni/` 下 CNI 插件二进制复制到 `/opt/cni/bin/`
 - 备份原 containerd 配置为 `/etc/containerd/config.toml.bak.<timestamp>`
 
 ---
@@ -107,6 +128,7 @@ sudo K8S_VERSION=1.28 REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./
 | `POD_CIDR` | `10.244.0.0/16` | Pod 网络段 |
 | `SVC_CIDR` | `10.96.0.0/12` | Service 网络段 |
 | `CNI_PLUGIN` | `flannel` | `flannel` / `calico` / `none` |
+| `REGISTRY_MIRROR` | 空 | 镜像加速地址。若设置且 containerd 配置中 sandbox_image 仍指向 registry.k8s.io，脚本会自动修正 |
 | `TOKEN_TTL` | `24h` | join token 有效期，`0` 表示永不过期 |
 | `JOIN_FILE` | `/root/k8s-join.sh` | join 命令保存路径 |
 
@@ -118,6 +140,9 @@ sudo ./master.sh
 
 # 指定 API Server 地址（多网卡环境）
 sudo API_SERVER_ADDR=192.168.1.10 ./master.sh
+
+# 国内/Kylin 环境（必须传入 REGISTRY_MIRROR）
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./master.sh
 
 # 国内环境 + Calico CNI
 sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers \
@@ -225,6 +250,19 @@ sudo ./set-node-mode.sh biren node1,node2,node3
 sudo PLUGIN_DIR=/path/to/plugin-dir ./set-node-mode.sh biren
 ```
 
+**BirenTech device plugin 准备：**
+
+`packages/biren/` 目录需包含：
+- `*.tar` — 设备插件镜像（从发布包中的 `k8s_device_plugin_*.tar.gz` 解压获取内层 tar）
+- `biren-device-plugin.yaml` — DaemonSet 配置
+
+该目录已被 `.gitignore` 排除（含大文件），使用前需从发布包手动填充：
+```bash
+gunzip -c /data/release/<version>/images/k8s_device_plugin_*.tar.gz \
+    | tar -xf - -C packages/biren/
+# 或直接解压 .tar.gz（外层为 wrapper，内含同名 .tar）
+```
+
 **与 join.sh biren 的区别：**
 - `join.sh biren` — 用于**首次**加入集群时设置为 GPU 节点
 - `set-node-mode.sh biren` — 用于**已加入**集群的节点切换角色（包括 master 节点）
@@ -233,7 +271,7 @@ sudo PLUGIN_DIR=/path/to/plugin-dir ./set-node-mode.sh biren
 
 ### k8s_clean.sh — 清除 k8s 环境
 
-将系统重置到 k8s 安装之前的状态。执行前打印完整操作摘要，**需用户确认后再执行**。
+将系统重置到 k8s 安装之前的状态。自动检测 OS（Ubuntu/Kylin），执行前打印完整操作摘要，**需用户确认后再执行**。
 
 **用法：**
 
@@ -243,15 +281,17 @@ sudo ./k8s_clean.sh
 
 **清除内容：**
 
-1. `kubeadm reset -f` — 清理控制面/节点状态
-2. 卸载 `kubeadm / kubelet / kubectl / kubernetes-cni` 包（包括 hold 状态）
-3. 移除 k8s apt 源（`/etc/apt/sources.list.d/kubernetes.list`）和 GPG 密钥
-4. 删除目录：`/etc/kubernetes`、`/var/lib/kubelet`、`/var/lib/etcd`、`/opt/cni`、`/var/lib/cni`
+1. `kubeadm reset -f` — 清理控制面/节点状态（Kylin 自动指定 `--cri-socket`）
+2. 卸载 k8s 包（Ubuntu：`apt purge kubeadm kubelet kubectl kubernetes-cni`；Kylin：`yum remove kubeadm kubelet kubectl`）
+3. 移除 k8s 包管理器源（Ubuntu：`/etc/apt/sources.list.d/kubernetes.list`；Kylin：`/etc/yum.repos.d/kubernetes.repo`）和 GPG 密钥
+4. 删除目录：`/etc/kubernetes`、`/var/lib/kubelet`、`/var/lib/etcd`、`/opt/cni`、`/var/lib/cni`、`/etc/cni/net.d`
 5. 删除用户 `~/.kube` 配置
 6. 从备份恢复 containerd 配置（最新 `config.toml.bak.*`）
 7. 删除 k8s 写入的 `/etc/sysctl.d/99-k8s.conf` 和 `/etc/modules-load.d/k8s.conf`
 8. 清理残留 CNI 接口（`cni0`、`flannel.1` 等）和 iptables 规则
 9. 重启 containerd
+
+> `/etc/cni/net.d/` 会被一并清除，避免旧版 Calico/Flannel 配置残留干扰下次部署。
 
 **不影响：** containerd 服务本身、Docker、BirenTech runtime、`/data/registry` 存储、原有应用数据
 
@@ -282,7 +322,7 @@ REGISTRY_K8S_NAMESPACE=kube-system   # 部署命名空间
 ```
 
 **执行流程：**
-1. 拉取 `registry:2` 镜像（已存在则跳过）
+1. 拉取 `registry:2` 镜像（已存在则跳过；docker.io 不可达时自动尝试 `docker.m.daocloud.io` 等备用镜像源）
 2. 准备存储目录
 3. 在 k8s 中部署 Deployment + NodePort Service（自动启用 `REGISTRY_STORAGE_DELETE_ENABLED=true`）
 4. 等待 Registry 就绪
@@ -404,9 +444,6 @@ sudo ./registry/registry-trust.sh apply --ssh-user admin --ssh-key ~/.ssh/id_rsa
 # 查看本机生效的所有信任配置
 ./registry/registry-trust.sh list
 
-# 列出当前生效配置（不执行删除）
-./registry/registry-trust.sh remove
-
 # 移除指定 Registry 的信任
 sudo ./registry/registry-trust.sh remove --config registry-trust.conf
 ```
@@ -442,11 +479,11 @@ sudo ./registry/registry_clean.sh [配置文件路径]
 ```bash
 cd setup/kubernets
 
-# 安装
-sudo ./install.sh
+# 安装（国内/Kylin 环境必须带 REGISTRY_MIRROR）
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./install.sh
 
 # 初始化控制面
-sudo ./master.sh
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./master.sh
 
 # 切换为 BirenTech GPU 算力节点
 sudo ./set-node-mode.sh biren
@@ -468,14 +505,14 @@ curl http://$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].addr
 
 ```bash
 # === 在 Master 节点执行 ===
-sudo ./install.sh
-sudo ./master.sh                      # 生成 /root/k8s-join.sh
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./install.sh
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./master.sh   # 生成 /root/k8s-join.sh
 
 # 将 join 文件分发到 Worker 节点
 scp /root/k8s-join.sh worker01:/root/k8s-join.sh
 
 # === 在 Worker 节点执行 ===
-sudo ./install.sh
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./install.sh
 sudo ./join.sh biren                  # 以 GPU 节点加入
 
 # === 在 Master 节点执行（部署 Registry，推送镜像，分发信任）===
@@ -511,7 +548,8 @@ sudo ./registry/registry_clean.sh
 sudo ./k8s_clean.sh
 
 # 重新初始化
-sudo ./install.sh && sudo ./master.sh
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./install.sh
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./master.sh
 ```
 
 ---
@@ -519,9 +557,11 @@ sudo ./install.sh && sudo ./master.sh
 ## 注意事项
 
 - 所有 `sudo` 脚本需要 root 权限
+- **国内/Kylin 环境**：`install.sh` 和 `master.sh` 均需传入 `REGISTRY_MIRROR=registry.aliyuncs.com/google_containers`，否则 containerd sandbox_image 和 kubeadm 镜像拉取会因 `registry.k8s.io` 不可达而失败
 - `join.sh` 和 `set-node-mode.sh` 使用 `kubelet.conf` 操作本机节点标签，不依赖 admin.conf
 - `join.sh biren` 的 DaemonSet 部署需要 admin.conf，若不存在则跳过（假设 master 已通过 `set-node-mode.sh biren` 首次部署）
 - BirenTech device plugin 的 `brml` volume 会自动修正 `libbiren-ml.so.1` 的绝对软链接路径
-- containerd v2 的插件路径为 `io.containerd.cri.v1.runtime`（不同于 v1 的 `io.containerd.grpc.v1.cri`）
+- Kylin 上 containerd v2 的插件路径为 `io.containerd.cri.v1.runtime`（不同于 v1 的 `io.containerd.grpc.v1.cri`）
 - Registry 信任配置写入 `certs.d` 后 containerd 动态读取，**无需重启**
 - `k8s_clean.sh` 执行后 containerd 备份文件（`config.toml.bak.*`）会被消耗，再次清除前需重新执行 `install.sh` 生成新备份
+- **Kylin 特有**：如果主机同时安装了 `cri-dockerd`，kubeadm 命令会遇到"多 CRI 端点"报错；相关脚本已内置 `--cri-socket unix:///run/containerd/containerd.sock` 参数规避

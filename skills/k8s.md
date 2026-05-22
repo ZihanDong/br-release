@@ -22,11 +22,11 @@ metadata:
 
 | Script | Needs root | Purpose |
 |--------|-----------|---------|
-| `install.sh` | yes | Install containerd + kubeadm/kubelet/kubectl on a node |
+| `install.sh` | yes | Install containerd + kubeadm/kubelet/kubectl on a node (Ubuntu or Kylin, auto-detected) |
 | `master.sh` | yes | Init control-plane (kubeadm init + CNI); outputs join command |
 | `join.sh <mode>` | yes | Join a node to an existing cluster as cpu / biren / worker |
 | `set-node-mode.sh <mode>` | yes | Switch an already-joined node between cpu / biren / none |
-| `k8s_clean.sh` | yes | Reset system to pre-k8s state; prompts before executing |
+| `k8s_clean.sh` | yes | Reset system to pre-k8s state; works on Ubuntu and Kylin; prompts before executing |
 | `registry/setup-registry.sh` | yes | Deploy registry:2 in k8s; writes registry-trust.conf |
 | `registry/update_images.sh` | yes | Sync images between images.conf and registry (add/purge/conf_gen) |
 | `registry/registry-trust.sh <sub>` | yes (apply/remove) | Inject or remove containerd trust on local or remote nodes |
@@ -34,13 +34,28 @@ metadata:
 
 Sample end-to-end scripts live in `setup/samples/`.
 
+### OS-specific lib files
+
+`install.sh` reads `/etc/os-release` and sources the correct OS variant automatically:
+
+| File | OS | Purpose |
+|------|----|---------|
+| `lib/preflight-ubuntu.sh` | Ubuntu | apt deps, ufw, kernel modules |
+| `lib/preflight-kylin.sh` | Kylin V10/V11 | yum deps, firewalld, copies CNI bins from `/usr/libexec/cni/` → `/opt/cni/bin/` |
+| `lib/container_runtime-ubuntu.sh` | Ubuntu | Install containerd via Docker CE apt repo |
+| `lib/container_runtime-kylin.sh` | Kylin V10/V11 | Configure existing containerd binary; create systemd service file if missing |
+| `lib/kubeadm-ubuntu.sh` | Ubuntu | Install k8s packages via apt (pkgs.k8s.io new/legacy channels) |
+| `lib/kubeadm-kylin.sh` | Kylin V10/V11 | Install k8s via yum; skip if already installed |
+| `lib/init_cluster.sh` | both | Shared kubeadm init/join logic |
+| `lib/common.sh` | both | Logging, OS detection, version comparison helpers |
+
 ---
 
 ## 1 — Cluster Setup
 
 ### 1.1 Install base environment (every node)
 
-Run before init or join:
+Run before init or join. Script auto-detects Ubuntu vs Kylin.
 
 ```bash
 sudo bash setup/kubernets/install.sh
@@ -51,14 +66,14 @@ Key environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `K8S_VERSION` | `1.30` | Version to install; accepts `1.28` or `1.28.5`; supports ≥ 1.19 |
-| `REGISTRY_MIRROR` | — | Image mirror (e.g. `registry.aliyuncs.com/google_containers`) for air-gapped environments |
+| `REGISTRY_MIRROR` | — | **Required for mainland China / Kylin environments** (registry.k8s.io unreachable). Use `registry.aliyuncs.com/google_containers` |
 | `CNI_PLUGIN` | `flannel` | `flannel` \| `calico` \| `none` |
-| `CONTAINERD_VERSION` | latest | Pin a specific containerd version |
+| `CONTAINERD_VERSION` | latest | Pin a specific containerd version (Ubuntu only; Kylin skips install if containerd exists) |
 
 **Side effects:**
-- Installs containerd; if already present, patches config in-place and saves backup as `config.toml.bak.<timestamp>`
-- Installs kubeadm / kubelet / kubectl with `apt-mark hold`
-- Writes `/etc/modules-load.d/k8s.conf` (overlay, br_netfilter) and `/etc/sysctl.d/99-k8s.conf`
+- Ubuntu: installs containerd via Docker CE apt repo; installs kubeadm/kubelet/kubectl with `apt-mark hold`
+- Kylin: configures existing containerd (patches config, creates systemd unit if missing); installs k8s via yum if not present; copies CNI plugin binaries from `/usr/libexec/cni/` to `/opt/cni/bin/`
+- Both: writes `/etc/modules-load.d/k8s.conf` (overlay, br_netfilter), `/etc/sysctl.d/99-k8s.conf`, and saves containerd config backup as `config.toml.bak.<timestamp>`
 
 ### 1.2 Initialize control-plane (master only)
 
@@ -74,6 +89,7 @@ Key environment variables:
 | `POD_CIDR` | `10.244.0.0/16` | Pod network CIDR |
 | `SVC_CIDR` | `10.96.0.0/12` | Service CIDR |
 | `CNI_PLUGIN` | `flannel` | Must match install.sh |
+| `REGISTRY_MIRROR` | — | If set and containerd sandbox_image still points to registry.k8s.io, master.sh auto-patches it before kubeadm init |
 | `TOKEN_TTL` | `24h` | join token TTL; `0` = non-expiring |
 | `JOIN_FILE` | `/root/k8s-join.sh` | Where to write the worker join command |
 
@@ -147,6 +163,17 @@ Environment variables:
 | `PLUGIN_DIR` | `packages/biren/` | Directory containing `*.tar` image and `biren-device-plugin.yaml` |
 | `PLUGIN_NAMESPACE` | `biren-gpu` | Namespace for device plugin DaemonSet |
 
+### Preparing packages/biren/
+
+`packages/biren/` is gitignored (large binaries). Populate it from the release package before running biren mode:
+
+```bash
+# The release .tar.gz is a wrapper; extract it to get the inner image tar
+gunzip -c /data/release/<version>/images/k8s_device_plugin_*.tar.gz \
+    | tar -xf - -C packages/biren/
+# Result: packages/biren/ contains k8s_device_plugin_*.tar + biren-device-plugin.yaml
+```
+
 ### BirenTech Device Plugin details
 
 - Imported from tarball into containerd `k8s.io` namespace
@@ -193,7 +220,7 @@ sudo bash setup/kubernets/registry/setup-registry.sh /path/to/registry.conf
 ```
 
 **What it does:**
-1. Pulls `registry:2` into containerd `k8s.io` namespace (skips if already present)
+1. Pulls `registry:2` into containerd `k8s.io` namespace (skips if already present); if docker.io is unreachable, automatically tries mirrors in order: `docker.m.daocloud.io`, `hub.uuuadc.cn`, `docker.1panel.live`
 2. Creates storage directory
 3. Deploys k8s Deployment + NodePort Service on the control-plane node (`REGISTRY_STORAGE_DELETE_ENABLED=true` is set automatically)
 4. Waits for registry HTTP endpoint to become reachable
@@ -329,20 +356,24 @@ If the API server is unreachable (e.g., cluster already torn down), step 1 is sk
 
 ### 4.2 k8s_clean.sh — full k8s reset
 
+Works on both Ubuntu and Kylin; auto-detects OS.
+
 ```bash
 sudo bash setup/kubernets/k8s_clean.sh
 ```
 
 **Removes (9 steps):**
-1. `kubeadm reset -f`
-2. Packages: kubeadm, kubelet, kubectl, kubernetes-cni (including `hi` hold-state packages)
-3. k8s apt source + GPG keyring
-4. Directories: `/etc/kubernetes`, `/var/lib/kubelet`, `/var/lib/etcd`, `/opt/cni`, `/var/lib/cni`
+1. `kubeadm reset -f` (with explicit `--cri-socket` on hosts with multiple CRI endpoints)
+2. Packages: Ubuntu — apt purge kubeadm/kubelet/kubectl/kubernetes-cni; Kylin — yum remove
+3. k8s package source: Ubuntu — apt source + GPG keyring; Kylin — yum repo file
+4. Directories: `/etc/kubernetes`, `/var/lib/kubelet`, `/var/lib/etcd`, `/opt/cni`, `/var/lib/cni`, `/etc/cni/net.d`
 5. `~/.kube/` for all system users
 6. containerd config restored from most recent `config.toml.bak.*` backup
 7. `/etc/sysctl.d/99-k8s.conf` + `/etc/modules-load.d/k8s.conf`
 8. CNI interfaces (`cni0`, `flannel.1`, etc.) + iptables flush
 9. `systemctl restart containerd`
+
+**Note:** `/etc/cni/net.d/` is wiped to prevent stale CNI configs (e.g. leftover Calico conflist) from blocking the next deployment.
 
 **Preserves:** containerd service, Docker, BirenTech runtime, registry storage, all original app data.
 
@@ -354,9 +385,11 @@ sudo bash setup/kubernets/k8s_clean.sh
 sudo bash setup/kubernets/registry/registry_clean.sh   # confirm y
 sudo bash setup/kubernets/k8s_clean.sh                 # confirm y
 
-# Reinstall
-sudo bash setup/kubernets/install.sh
-sudo bash setup/kubernets/master.sh
+# Reinstall (add REGISTRY_MIRROR for China/Kylin environments)
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers \
+    bash setup/kubernets/install.sh
+sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers \
+    bash setup/kubernets/master.sh
 sudo bash setup/kubernets/set-node-mode.sh biren
 sudo bash setup/kubernets/registry/setup-registry.sh
 ```
@@ -364,7 +397,13 @@ sudo bash setup/kubernets/registry/setup-registry.sh
 ### 4.4 Verify clean state
 
 ```bash
+# Ubuntu
 dpkg -l kubeadm kubelet kubectl 2>/dev/null | grep '^[ih][ih]' || echo "packages removed"
+
+# Kylin
+rpm -q kubeadm kubelet kubectl 2>/dev/null || echo "packages removed"
+
+# Both
 pgrep -x kubelet || echo "kubelet stopped"
 systemctl is-active containerd        # should be active
 ls /etc/kubernetes 2>/dev/null || echo "dir removed"
@@ -385,4 +424,9 @@ ls /etc/kubernetes 2>/dev/null || echo "dir removed"
 | DaemonSet pod stuck `Pending` | Missing GPU label | Re-run `set-node-mode.sh biren` |
 | `ImagePullBackOff` on workers | Trust config not injected | Run `registry-trust.sh apply <node>` on master |
 | `ctr push` fails unauthorized | Missing `--plain-http` for HTTP registry | Add `--plain-http` flag |
-| `kubernetes-cni` purge blocked by held packages | `apt purge` respects dependency order | `apt-mark unhold` all k8s packages first, then purge together |
+| **Kylin:** `kubernetes-cni` not found | RPM package names differ from Ubuntu | `kubeadm-kylin.sh` installs `kubernetes-cni` as `kubernetes-cni`; if missing, check yum repo or install separately |
+| **Kylin:** CoreDNS stuck `ContainerCreating` — "plugin type=calico failed" | Stale Calico CNI config in `/etc/cni/net.d/` from a previous deploy | `k8s_clean.sh` now removes `/etc/cni/net.d/`; for a running cluster: `sudo mv /etc/cni/net.d/10-calico.conflist /tmp/ && kubectl delete pod -n kube-system -l k8s-app=kube-dns` |
+| **Kylin:** CoreDNS stuck — "failed to find plugin bridge in /opt/cni/bin" | CNI binaries not in expected path | `preflight-kylin.sh` now copies them from `/usr/libexec/cni/`; for a running cluster: `sudo cp /usr/libexec/cni/* /opt/cni/bin/` |
+| **Kylin:** kubeadm fails — "Found multiple CRI endpoints" | Both containerd and cri-dockerd sockets present | All scripts pass `--cri-socket unix:///run/containerd/containerd.sock` explicitly |
+| **Kylin:** kubelet can't pull pause image | `sandbox_image` points to `registry.k8s.io` because install.sh ran without REGISTRY_MIRROR | `master.sh patch_sandbox_image()` auto-fixes when REGISTRY_MIRROR is set; manual fix: `sudo sed -i 's|sandbox_image.*|sandbox_image = "registry.aliyuncs.com/google_containers/pause:3.8"|' /etc/containerd/config.toml && sudo systemctl restart containerd` |
+| **Kylin:** `registry:2` pull hangs | docker.io unreachable | `setup-registry.sh` auto-falls back to `docker.m.daocloud.io`; or pre-pull: `sudo ctr -n k8s.io images pull docker.m.daocloud.io/library/registry:2 && sudo ctr -n k8s.io images tag docker.m.daocloud.io/library/registry:2 docker.io/library/registry:2` |
