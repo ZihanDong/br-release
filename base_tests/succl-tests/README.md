@@ -75,8 +75,8 @@ sudo bash base_tests/succl-tests/run_succl_tests.sh multi allreduce 8
 ### 主要配置变量（脚本顶部）
 
 ```bash
-SDK_ROOT_PATH="/data/release/2602rc2/"   # SDK 根目录
-IMAGE_NAME="birensupa-sdk:26.02.rc2-br1xx"
+SDK_ROOT_PATH="/data/release/2604rc2/"   # SDK 根目录
+IMAGE_NAME="birensupa-sdk:26.04.rc2-br1xx"
 CONTAINER_NAME="biren_succl_tests"
 SSH_PORT=2222
 ```

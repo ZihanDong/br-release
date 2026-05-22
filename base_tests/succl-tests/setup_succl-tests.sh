@@ -35,12 +35,12 @@
 set -euo pipefail
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
-SDK_ROOT_PATH="/data/release/2602rc2/"
+SDK_ROOT_PATH="/data/release/2604rc2/"
 SUCCL_TEST_PACKAGE="packages/ubuntu-22.04/succl-tests_*.tar.gz"
 BASE_IMAGE="images/birensupa-sdk-*.tar"
 
 CONTAINER_NAME="biren_succl_tests"
-IMAGE_NAME="birensupa-sdk:26.02.rc2-br1xx"
+IMAGE_NAME="birensupa-sdk:26.04.rc2-br1xx"
 SSH_PORT=2222          # container sshd port (avoids conflict with host :22 on --net=host)
 INSTALL_DIR="/opt/succl-tests"
 # ───────────────────────────────────────────────────────────────────────────────
@@ -78,6 +78,23 @@ if [[ "$MODE" == "multi" && -z "$SSH_KEY_PASS" ]]; then
     usage
 fi
 
+# ── multi 模式预检：依赖文件必须存在 ──────────────────────────────────────────
+if [[ "$MODE" == "multi" ]]; then
+    PREFLIGHT_OK=1
+    if [[ ! -f "$ENC_FILE" ]]; then
+        echo "ERROR: SSH key archive not found: $ENC_FILE" >&2
+        PREFLIGHT_OK=0
+    fi
+    if [[ ! -f "$SSH_SETUP_SCRIPT" ]]; then
+        echo "ERROR: SSH setup script not found: $SSH_SETUP_SCRIPT" >&2
+        PREFLIGHT_OK=0
+    fi
+    if [[ "$PREFLIGHT_OK" -eq 0 ]]; then
+        echo "  请将加密密钥包和部署脚本放入 ${SSH_SETTINGS_DIR}/ 后重试。" >&2
+        exit 1
+    fi
+fi
+
 echo "=== succl-tests setup: ${MODE}-node mode ==="
 
 # ── 1. InfiniBand device detection ────────────────────────────────────────────
@@ -93,7 +110,7 @@ fi
 
 # ── 2. Load Docker image if not already present ────────────────────────────────
 if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-    IMAGE_TAR=$(ls ${SDK_ROOT_PATH}${BASE_IMAGE} 2>/dev/null | head -1)
+    IMAGE_TAR=$(ls ${SDK_ROOT_PATH}${BASE_IMAGE} 2>/dev/null | head -1) || true
     if [[ -z "$IMAGE_TAR" ]]; then
         echo "ERROR: Base image not found at ${SDK_ROOT_PATH}${BASE_IMAGE}" >&2
         exit 1
@@ -158,7 +175,7 @@ fi
 
 # ── 6. Install succl-tests ────────────────────────────────────────────────────
 echo "[succl-tests] Installing..."
-SUCCL_PKG=$(ls ${SDK_ROOT_PATH}${SUCCL_TEST_PACKAGE} 2>/dev/null | head -1)
+SUCCL_PKG=$(ls ${SDK_ROOT_PATH}${SUCCL_TEST_PACKAGE} 2>/dev/null | head -1) || true
 if [[ -z "$SUCCL_PKG" ]]; then
     echo "ERROR: succl-tests package not found at ${SDK_ROOT_PATH}${SUCCL_TEST_PACKAGE}" >&2
     exit 1
