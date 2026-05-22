@@ -129,6 +129,7 @@ fi
 # ── 4. Start container ─────────────────────────────────────────────────────────
 echo "[Container] Starting: $CONTAINER_NAME"
 docker run -d --name "$CONTAINER_NAME" \
+    --restart unless-stopped \
     --cap-add=IPC_LOCK \
     --shm-size='256g' \
     --ulimit memlock=-1 \
@@ -138,7 +139,13 @@ docker run -d --name "$CONTAINER_NAME" \
     --net host \
     --device /dev/biren \
     "${IB_ARGS[@]}" \
-    "$IMAGE_NAME" /bin/bash -c "tail -f /dev/null"
+    "$IMAGE_NAME" /bin/bash -c "
+        mkdir -p /run/sshd
+        if [[ '${MODE}' == 'multi' ]] && command -v sshd &>/dev/null; then
+            /usr/sbin/sshd 2>/dev/null || true
+        fi
+        tail -f /dev/null
+    "
 
 # ── 5. SSH setup (multi-node only) ────────────────────────────────────────────
 if [[ "$MODE" == "multi" ]]; then

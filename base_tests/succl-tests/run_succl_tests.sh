@@ -356,6 +356,11 @@ process_section() {
     s_step_bytes=$( ini_get "$conf_file" "$section" "step_bytes"  "0")
     s_step_factor=$(ini_get "$conf_file" "$section" "step_factor" "2")
 
+    # ── Per-section iter/warmup overrides (optional; fall back to general.conf) ──
+    local s_iters s_warmup_iters
+    s_iters=$(       ini_get "$conf_file" "$section" "iters"        "$ITERS")
+    s_warmup_iters=$(ini_get "$conf_file" "$section" "warmup_iters" "$WARMUP_ITERS")
+
     # ── Resolve ops list ──────────────────────────────────────────────────────
     local -a run_ops=()
     if [[ "$s_ops" == "all" ]]; then
@@ -380,8 +385,8 @@ process_section() {
         -o "$REDUCE_OP"
         -d "$DATATYPE"
         -r "$ROOT"
-        -n "$ITERS"
-        -w "$WARMUP_ITERS"
+        -n "$s_iters"
+        -w "$s_warmup_iters"
         -m "$AGG_ITERS"
         -a "$AVERAGE"
         -p "$PARALLEL_INIT"
@@ -429,6 +434,25 @@ process_section() {
         fi
     fi
 
+    # ── Multi-node: wait for sshd on all remote nodes before running ─────────────
+    if [[ "$s_mode" == "multi" ]]; then
+        local _ip
+        for _ip in "${MULTI_NODE_IPS[@]}"; do
+            local _tries=0
+            while ! docker exec "$CONTAINER_NAME" bash -c \
+                    "ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
+                     -o ConnectTimeout=3 -p ${SSH_PORT} root@${_ip} 'true'" &>/dev/null; do
+                (( _tries++ ))
+                if [[ $_tries -ge 10 ]]; then
+                    echo "[SSH] WARNING: ${_ip}:${SSH_PORT} not ready after 10 retries, skipping wait." >&2
+                    break
+                fi
+                echo "[SSH] Waiting for sshd on ${_ip}:${SSH_PORT} (attempt ${_tries}/10)..."
+                sleep 2
+            done
+        done
+    fi
+
     # ── Section header ────────────────────────────────────────────────────────
     echo ""
     echo "──── [${section}]  mode=${s_mode}  ops=${s_ops}  gpus=${s_gpus} ────"
@@ -452,7 +476,7 @@ ${bin_path} ${succl_args[*]}"
             CURR_INNER_CMD="mpiexec --allow-run-as-root \
 --mca pml ^ucx \
 ${mpi_iface_arg} \
---mca plm_rsh_args \"-p ${SSH_PORT}\" \
+--mca plm_rsh_args \"-p ${SSH_PORT} -o StrictHostKeyChecking=no\" \
 --host ${mpi_hosts_str} \
 ${mpi_env_args[*]} \
 -x LD_LIBRARY_PATH \
