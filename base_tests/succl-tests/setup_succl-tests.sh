@@ -145,17 +145,26 @@ if [[ "$MODE" == "multi" ]]; then
     echo "[SSH] Installing openssh-server..."
     docker exec "$CONTAINER_NAME" bash -c "
         set -e
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq
-        apt-get install -y --no-install-recommends openssh-server openssh-client
+        if ! dpkg -l openssh-server 2>/dev/null | grep -q '^ii'; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y --no-install-recommends openssh-server openssh-client
+        else
+            echo 'openssh-server already installed, skipping apt-get.'
+        fi
         mkdir -p /run/sshd /root/.ssh
         chmod 700 /root/.ssh
+
+        # Generate host keys if missing (needed in fresh containers)
+        ssh-keygen -A 2>/dev/null || true
 
         sed -i 's/^#*Port .*/Port ${SSH_PORT}/'                          /etc/ssh/sshd_config
         sed -i 's/^#*PermitRootLogin .*/PermitRootLogin yes/'            /etc/ssh/sshd_config
         sed -i 's/^#*PubkeyAuthentication .*/PubkeyAuthentication yes/'  /etc/ssh/sshd_config
         sed -i 's/^#*AuthorizedKeysFile .*/AuthorizedKeysFile .ssh\/authorized_keys/' /etc/ssh/sshd_config
         grep -q '^Port ' /etc/ssh/sshd_config || echo 'Port ${SSH_PORT}' >> /etc/ssh/sshd_config
+        grep -q '^PubkeyAuthentication ' /etc/ssh/sshd_config || echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config
+        grep -q '^PermitRootLogin '      /etc/ssh/sshd_config || echo 'PermitRootLogin yes'      >> /etc/ssh/sshd_config
     "
 
     echo "[SSH] Deploying shared key pair..."
@@ -170,7 +179,7 @@ if [[ "$MODE" == "multi" ]]; then
     "
 
     echo "[SSH] Starting sshd on port ${SSH_PORT}..."
-    docker exec "$CONTAINER_NAME" service ssh start
+    docker exec "$CONTAINER_NAME" bash -c "/usr/sbin/sshd || service ssh start"
 fi
 
 # ── 6. Install succl-tests ────────────────────────────────────────────────────
@@ -245,8 +254,16 @@ echo ""
 if [[ "$MODE" == "multi" ]]; then
     echo "[Verify] Passwordless SSH (container → localhost:${SSH_PORT})..."
     docker exec "$CONTAINER_NAME" bash -c "
-        sleep 1
-        ssh -o StrictHostKeyChecking=no -o BatchMode=yes -p ${SSH_PORT} root@127.0.0.1 'echo SSH_OK'
+        # Wait up to 10 s for sshd to accept connections
+        for i in \$(seq 1 10); do
+            if ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
+                   -o ConnectTimeout=2 -p ${SSH_PORT} root@127.0.0.1 'echo SSH_OK' 2>/dev/null; then
+                exit 0
+            fi
+            sleep 1
+        done
+        echo 'SSH still not ready after 10 s — last attempt:' >&2
+        ssh -v -o StrictHostKeyChecking=no -o BatchMode=yes -p ${SSH_PORT} root@127.0.0.1 'echo SSH_OK'
     " && echo "[Verify] Passwordless SSH: OK" \
       || echo "[Verify] WARNING: SSH check failed — inspect sshd status."
 else
