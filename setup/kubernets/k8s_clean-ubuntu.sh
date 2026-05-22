@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # 重置系统到 k8s 安装之前的状态
-# 支持 Ubuntu (apt) 和 Kylin V10/V11 (yum/dnf)
 #
 # 执行内容：
 #   1. kubeadm reset（清理 k8s 控制面/节点状态）
-#   2. 卸载 kubeadm / kubelet / kubectl 包
-#   3. 移除 k8s 包管理器源（apt/yum）及 GPG 密钥
+#   2. 卸载 kubeadm / kubelet / kubectl / kubernetes-cni 包
+#   3. 移除 k8s apt 源及 GPG 密钥
 #   4. 清理 /etc/kubernetes、/var/lib/kubelet、/var/lib/etcd、/opt/cni 等目录
 #   5. 清理 ~/.kube 用户配置
 #   6. 恢复 containerd 配置备份（最新 .bak.* 文件）
@@ -25,39 +24,25 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 source "${LIB_DIR}/common.sh"
 
 require_root
-detect_os   # sets OS_ID and PKG_MGR
 
 # ── 收集当前状态 ───────────────────────────────────────────────────────────────
+_K8S_PKGS=()
+for pkg in kubeadm kubelet kubectl kubernetes-cni; do
+    # match both 'ii' (installed) and 'hi' (installed+hold)
+    dpkg -l "${pkg}" 2>/dev/null | grep -qE '^[ih][ih]' && _K8S_PKGS+=("${pkg}") || true
+done
+
 _KUBEADM_INSTALLED=false
 command -v kubeadm &>/dev/null && _KUBEADM_INSTALLED=true
 
-_K8S_PKGS=()
-if [[ "${OS_ID}" == "kylin" ]]; then
-    for pkg in kubeadm kubelet kubectl; do
-        rpm -q "${pkg}" &>/dev/null && _K8S_PKGS+=("${pkg}") || true
-    done
-else
-    for pkg in kubeadm kubelet kubectl kubernetes-cni; do
-        dpkg -l "${pkg}" 2>/dev/null | grep -qE '^[ih][ih]' && _K8S_PKGS+=("${pkg}") || true
-    done
-fi
+_APT_SOURCES=()
+[[ -f /etc/apt/sources.list.d/kubernetes.list ]] && _APT_SOURCES+=("/etc/apt/sources.list.d/kubernetes.list")
 
-_REPO_FILES=()
-if [[ "${OS_ID}" == "kylin" ]]; then
-    [[ -f /etc/yum.repos.d/kubernetes.repo ]] && _REPO_FILES+=("/etc/yum.repos.d/kubernetes.repo")
-    find /etc/pki/rpm-gpg -name 'kubernetes*.gpg' 2>/dev/null \
-        | while read -r f; do _REPO_FILES+=("${f}"); done || true
-else
-    [[ -f /etc/apt/sources.list.d/kubernetes.list ]] \
-        && _REPO_FILES+=("/etc/apt/sources.list.d/kubernetes.list")
-    [[ -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg ]] \
-        && _REPO_FILES+=("/etc/apt/keyrings/kubernetes-apt-keyring.gpg")
-    [[ -f /etc/apt/keyrings/kubernetes-archive-keyring.gpg ]] \
-        && _REPO_FILES+=("/etc/apt/keyrings/kubernetes-archive-keyring.gpg")
-fi
+_APT_KEYRINGS=()
+[[ -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg ]] && _APT_KEYRINGS+=("/etc/apt/keyrings/kubernetes-apt-keyring.gpg")
 
 _DIRS=()
-for d in /etc/kubernetes /var/lib/kubelet /var/lib/etcd /opt/cni /var/lib/cni /etc/cni/net.d /run/flannel; do
+for d in /etc/kubernetes /var/lib/kubelet /var/lib/etcd /opt/cni /var/lib/cni /run/flannel; do
     [[ -e "${d}" ]] && _DIRS+=("${d}")
 done
 
@@ -66,6 +51,7 @@ for u in $(getent passwd | awk -F: '$3>=1000 && $3<65534 {print $6}') /root; do
     [[ -d "${u}/.kube" ]] && _KUBE_USER_DIRS+=("${u}/.kube")
 done
 
+# containerd 备份
 _CTD_BAK=""
 _CTD_BAK=$(ls -t /etc/containerd/config.toml.bak.* 2>/dev/null | head -1 || true)
 
@@ -73,9 +59,9 @@ _SYSCTL_FILES=()
 [[ -f /etc/sysctl.d/99-k8s.conf ]] && _SYSCTL_FILES+=("/etc/sysctl.d/99-k8s.conf")
 
 _MODULES_FILES=()
-[[ -f /etc/modules-load.d/k8s.conf  ]] && _MODULES_FILES+=("/etc/modules-load.d/k8s.conf")
-[[ -f /etc/modules-load.d/ipvs.conf ]] && _MODULES_FILES+=("/etc/modules-load.d/ipvs.conf")
+[[ -f /etc/modules-load.d/k8s.conf ]] && _MODULES_FILES+=("/etc/modules-load.d/k8s.conf")
 
+# CNI 网络接口
 _CNI_IFACES=()
 for iface in cni0 flannel.1 tunl0 vxlan.calico; do
     ip link show "${iface}" &>/dev/null && _CNI_IFACES+=("${iface}") || true
@@ -84,12 +70,16 @@ done
 # ── 打印 Summary ───────────────────────────────────────────────────────────────
 echo
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║    k8s 清理 —— 待执行操作摘要  (OS: ${OS_ID} ${OS_VERSION_ID})    ║"
+echo "║              k8s 清理 —— 待执行操作摘要                     ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo
 
 echo "【1】kubeadm reset"
-${_KUBEADM_INSTALLED} && echo "    执行: kubeadm reset -f" || echo "    kubeadm 未安装，跳过。"
+if ${_KUBEADM_INSTALLED}; then
+    echo "    执行: kubeadm reset -f"
+else
+    echo "    kubeadm 未安装，跳过。"
+fi
 echo
 
 echo "【2】卸载 k8s 软件包"
@@ -100,28 +90,37 @@ else
 fi
 echo
 
-echo "【3】移除包管理器 k8s 源 / GPG 密钥"
-if [[ ${#_REPO_FILES[@]} -gt 0 ]]; then
-    for f in "${_REPO_FILES[@]}"; do echo "    - ${f}"; done
+echo "【3】移除 apt 源 / GPG 密钥"
+if [[ ${#_APT_SOURCES[@]} -gt 0 || ${#_APT_KEYRINGS[@]} -gt 0 ]]; then
+    for f in "${_APT_SOURCES[@]}" "${_APT_KEYRINGS[@]}"; do echo "    - ${f}"; done
 else
-    echo "    未检测到 k8s 源文件。"
+    echo "    未检测到 k8s apt 源文件。"
 fi
 echo
 
 echo "【4】删除 k8s 目录"
-[[ ${#_DIRS[@]} -gt 0 ]] && for d in "${_DIRS[@]}"; do echo "    - ${d}"; done \
-    || echo "    无需清理的目录。"
+if [[ ${#_DIRS[@]} -gt 0 ]]; then
+    for d in "${_DIRS[@]}"; do echo "    - ${d}"; done
+else
+    echo "    无需清理的目录。"
+fi
 echo
 
 echo "【5】清理用户 ~/.kube 配置"
-[[ ${#_KUBE_USER_DIRS[@]} -gt 0 ]] && for d in "${_KUBE_USER_DIRS[@]}"; do echo "    - ${d}"; done \
-    || echo "    无 ~/.kube 目录。"
+if [[ ${#_KUBE_USER_DIRS[@]} -gt 0 ]]; then
+    for d in "${_KUBE_USER_DIRS[@]}"; do echo "    - ${d}"; done
+else
+    echo "    无 ~/.kube 目录。"
+fi
 echo
 
 echo "【6】恢复 containerd 配置"
-[[ -n "${_CTD_BAK}" ]] \
-    && echo "    备份文件: ${_CTD_BAK} → /etc/containerd/config.toml" \
-    || echo "    未找到 containerd 配置备份，跳过。"
+if [[ -n "${_CTD_BAK}" ]]; then
+    echo "    备份文件: ${_CTD_BAK}"
+    echo "    恢复到 : /etc/containerd/config.toml"
+else
+    echo "    未找到 containerd 配置备份（/etc/containerd/config.toml.bak.*），跳过。"
+fi
 echo
 
 echo "【7】移除 k8s sysctl / modules-load 配置"
@@ -133,8 +132,11 @@ fi
 echo
 
 echo "【8】清理残留 CNI 网络接口"
-[[ ${#_CNI_IFACES[@]} -gt 0 ]] && for i in "${_CNI_IFACES[@]}"; do echo "    - ${i}"; done \
-    || echo "    无残留 CNI 接口。"
+if [[ ${#_CNI_IFACES[@]} -gt 0 ]]; then
+    for i in "${_CNI_IFACES[@]}"; do echo "    - ${i}"; done
+else
+    echo "    无残留 CNI 接口。"
+fi
 echo
 
 echo "【9】重启 containerd"
@@ -147,6 +149,7 @@ echo "           /data/registry 存储、原有应用数据"
 echo "──────────────────────────────────────────────────────────────"
 echo
 
+# ── 用户确认 ───────────────────────────────────────────────────────────────────
 read -rp "确认执行以上所有清理操作？[y/N] " _CONFIRM
 case "${_CONFIRM}" in
     y|Y|yes|YES) ;;
@@ -160,8 +163,7 @@ echo
 # 1. kubeadm reset
 if ${_KUBEADM_INSTALLED}; then
     log_info "Step 1/9: kubeadm reset..."
-    kubeadm reset -f --cri-socket unix:///run/containerd/containerd.sock \
-        2>&1 | sed 's/^/    /' || true
+    kubeadm reset -f 2>&1 | sed 's/^/    /' || true
 else
     log_info "Step 1/9: kubeadm 未安装，跳过。"
 fi
@@ -169,28 +171,20 @@ fi
 # 2. 卸载软件包
 log_info "Step 2/9: 卸载 k8s 软件包..."
 if [[ ${#_K8S_PKGS[@]} -gt 0 ]]; then
-    if [[ "${OS_ID}" == "kylin" ]]; then
-        # Remove versionlock if present
-        yum versionlock delete "${_K8S_PKGS[@]}" 2>/dev/null || true
-        yum remove -y "${_K8S_PKGS[@]}" 2>&1 | tail -5 || true
-    else
-        apt-mark unhold "${_K8S_PKGS[@]}" 2>/dev/null || true
-        DEBIAN_FRONTEND=noninteractive apt-get purge -y "${_K8S_PKGS[@]}" 2>&1 | tail -5 || true
-        apt-get autoremove -y 2>&1 | tail -3 || true
-    fi
+    apt-mark unhold "${_K8S_PKGS[@]}" 2>/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y "${_K8S_PKGS[@]}" 2>&1 | tail -5 || true
+    apt-get autoremove -y 2>&1 | tail -3 || true
     log_info "  软件包已卸载。"
 else
     log_info "  无需卸载。"
 fi
 
-# 3. 移除源文件
-log_info "Step 3/9: 移除 k8s 包管理器源..."
-for f in "${_REPO_FILES[@]}"; do
+# 3. 移除 apt 源 / 密钥
+log_info "Step 3/9: 移除 apt 源 / GPG 密钥..."
+for f in "${_APT_SOURCES[@]}" "${_APT_KEYRINGS[@]}"; do
     rm -f "${f}" && log_info "  已删除: ${f}"
 done
-if [[ "${OS_ID}" != "kylin" ]]; then
-    apt-get update -qq 2>/dev/null || true
-fi
+apt-get update -qq 2>/dev/null || true
 
 # 4. 删除 k8s 目录
 log_info "Step 4/9: 删除 k8s 目录..."
@@ -218,7 +212,9 @@ log_info "Step 7/9: 移除 k8s sysctl / modules 配置..."
 for f in "${_SYSCTL_FILES[@]}" "${_MODULES_FILES[@]}"; do
     rm -f "${f}" && log_info "  已删除: ${f}"
 done
-[[ ${#_SYSCTL_FILES[@]} -gt 0 ]] && sysctl --system &>/dev/null || true
+if [[ ${#_SYSCTL_FILES[@]} -gt 0 ]]; then
+    sysctl --system &>/dev/null || true
+fi
 
 # 8. 清理 CNI 网络接口
 log_info "Step 8/9: 清理 CNI 网络接口..."
@@ -226,6 +222,8 @@ for iface in "${_CNI_IFACES[@]}"; do
     ip link set "${iface}" down 2>/dev/null || true
     ip link delete "${iface}" 2>/dev/null && log_info "  已删除接口: ${iface}" || true
 done
+
+# iptables 规则清理（FORWARD/KUBE-*/CNI 链）
 if command -v iptables &>/dev/null; then
     iptables -F 2>/dev/null || true
     iptables -t nat -F 2>/dev/null || true
@@ -236,8 +234,8 @@ fi
 
 # 9. 重启 containerd
 log_info "Step 9/9: 重启 containerd..."
-systemctl restart containerd 2>/dev/null \
-    || log_warn "  containerd 重启失败（可能服务文件不存在，运行 install.sh 后再试）。"
+systemctl restart containerd
+log_info "  containerd 已重启。"
 
 echo
 log_info "════════════════════════════════════════════════════════"

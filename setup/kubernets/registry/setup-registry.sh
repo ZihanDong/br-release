@@ -83,16 +83,37 @@ preflight_check() {
 
 # ── 拉取 registry:2 镜像 ────────────────────────────────────────────────────────
 REGISTRY_IMAGE="docker.io/library/registry:2"
+# Fallback mirrors tried in order when docker.io is unreachable (e.g. mainland China).
+_REGISTRY_IMAGE_MIRRORS=(
+    "docker.m.daocloud.io/library/registry:2"
+    "hub.uuuadc.cn/library/registry:2"
+    "docker.1panel.live/library/registry:2"
+)
 
 pull_registry_image() {
-    if ctr -n k8s.io images ls 2>/dev/null | grep -q "registry:2"; then
+    if ctr -n k8s.io images ls 2>/dev/null | grep -q "docker.io/library/registry:2"; then
         log_info "registry:2 镜像已存在，跳过拉取。"
         return
     fi
     log_info "拉取 registry:2 镜像..."
-    ctr -n k8s.io images pull "${REGISTRY_IMAGE}" \
-        || die "registry:2 拉取失败，请检查网络或手动导入镜像。"
-    log_info "registry:2 镜像已就绪。"
+
+    # Try canonical source first
+    if ctr -n k8s.io images pull "${REGISTRY_IMAGE}" 2>/dev/null; then
+        log_info "registry:2 镜像已就绪（来源: ${REGISTRY_IMAGE}）。"
+        return
+    fi
+    log_warn "docker.io 不可达，尝试备用镜像源..."
+
+    for mirror_ref in "${_REGISTRY_IMAGE_MIRRORS[@]}"; do
+        log_info "  尝试: ${mirror_ref}"
+        if ctr -n k8s.io images pull "${mirror_ref}" 2>/dev/null; then
+            ctr -n k8s.io images tag "${mirror_ref}" "${REGISTRY_IMAGE}" 2>/dev/null || true
+            log_info "registry:2 镜像已就绪（来源: ${mirror_ref}）。"
+            return
+        fi
+    done
+
+    die "registry:2 拉取失败，请检查网络或通过 'ctr -n k8s.io images import <tar>' 手动导入镜像。"
 }
 
 # ── 创建存储目录 ────────────────────────────────────────────────────────────────

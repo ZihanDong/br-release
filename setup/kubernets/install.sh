@@ -42,12 +42,27 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 # ── Source libraries ──────────────────────────────────────────────────────────
 # shellcheck source=./lib/common.sh
 source "${LIB_DIR}/common.sh"
-# shellcheck source=./lib/preflight.sh
-source "${LIB_DIR}/preflight.sh"
-# shellcheck source=./lib/container_runtime.sh
-source "${LIB_DIR}/container_runtime.sh"
-# shellcheck source=./lib/kubeadm.sh
-source "${LIB_DIR}/kubeadm.sh"
+
+# Quick OS detection for selecting the right OS-specific lib files.
+# (Full detect_os with logging runs later inside main().)
+_QUICK_OS_ID=$(grep '^ID=' /etc/os-release 2>/dev/null \
+    | cut -d= -f2 | tr -d '"' || echo "ubuntu")
+
+if [[ "${_QUICK_OS_ID}" == "kylin" ]]; then
+    # shellcheck source=./lib/preflight-kylin.sh
+    source "${LIB_DIR}/preflight-kylin.sh"
+    # shellcheck source=./lib/container_runtime-kylin.sh
+    source "${LIB_DIR}/container_runtime-kylin.sh"
+    # shellcheck source=./lib/kubeadm-kylin.sh
+    source "${LIB_DIR}/kubeadm-kylin.sh"
+else
+    # shellcheck source=./lib/preflight-ubuntu.sh
+    source "${LIB_DIR}/preflight-ubuntu.sh"
+    # shellcheck source=./lib/container_runtime-ubuntu.sh
+    source "${LIB_DIR}/container_runtime-ubuntu.sh"
+    # shellcheck source=./lib/kubeadm-ubuntu.sh
+    source "${LIB_DIR}/kubeadm-ubuntu.sh"
+fi
 # shellcheck source=./lib/init_cluster.sh
 source "${LIB_DIR}/init_cluster.sh"
 

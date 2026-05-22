@@ -68,6 +68,32 @@ preflight_check() {
     fi
 }
 
+# ── 修复 containerd sandbox_image（当 install.sh 未传 REGISTRY_MIRROR 时）────
+# 若 REGISTRY_MIRROR 已设置，但 containerd 配置中的 sandbox_image 仍指向
+# registry.k8s.io，则在 kubeadm init 之前重新修正，避免 kubelet 无法拉取 pause 镜像。
+patch_sandbox_image() {
+    [[ -z "${REGISTRY_MIRROR}" ]] && return
+    local cfg=/etc/containerd/config.toml
+    [[ -f "${cfg}" ]] || return
+
+    if grep -q 'sandbox_image.*registry\.k8s\.io' "${cfg}" 2>/dev/null; then
+        # Derive pause version from K8S_VERSION (same logic as container_runtime libs)
+        local pause_ver="3.9"
+        if   version_gte "${K8S_VERSION}" "1.27"; then pause_ver="3.9"
+        elif version_gte "${K8S_VERSION}" "1.25"; then pause_ver="3.8"
+        elif version_gte "${K8S_VERSION}" "1.24"; then pause_ver="3.7"
+        elif version_gte "${K8S_VERSION}" "1.22"; then pause_ver="3.6"
+        else                                           pause_ver="3.5"
+        fi
+        local pause_image="${REGISTRY_MIRROR}/pause:${pause_ver}"
+        log_info "修正 containerd sandbox_image → ${pause_image}"
+        cp -p "${cfg}" "${cfg}.bak.$(date +%s)"
+        sed -i "s|sandbox_image = .*|sandbox_image = \"${pause_image}\"|g" "${cfg}"
+        systemctl restart containerd
+        log_info "containerd 已重启，sandbox_image 修正完成。"
+    fi
+}
+
 # ── 自动检测本机 IP ───────────────────────────────────────────────────────────
 detect_api_server_addr() {
     [[ -n "${API_SERVER_ADDR}" ]] && return
@@ -97,7 +123,9 @@ pull_images() {
     [[ -n "${K8S_VERSION}"    ]] && pull_args+=(--kubernetes-version "${K8S_VERSION}")
     [[ -n "${REGISTRY_MIRROR}" ]] && pull_args+=(--image-repository "${REGISTRY_MIRROR}")
 
-    kubeadm config images pull "${pull_args[@]}" 2>&1 | tee /tmp/kubeadm-pull.log \
+    kubeadm config images pull "${pull_args[@]}" \
+        --cri-socket=unix:///run/containerd/containerd.sock \
+        2>&1 | tee /tmp/kubeadm-pull.log \
         || log_warn "部分镜像拉取失败，kubeadm init 阶段会重试。"
 }
 
@@ -275,6 +303,7 @@ main() {
     detect_os
     preflight_check
     detect_api_server_addr
+    patch_sandbox_image
 
     log_info "=== Step 1/5: 拉取控制面镜像 ==="
     pull_images

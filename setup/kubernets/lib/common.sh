@@ -74,3 +74,7 @@ command_exists() { command -v "$1" &>/dev/null; }
 apt_install() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
 }
+
+yum_install() {
+    yum install -y "$@"
+}
