@@ -119,7 +119,7 @@ SSH_PORT=2222
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `LOG_PATH` | `/home/zanedong/br-release/logs/suvs` | 日志根目录（可通过环境变量覆盖） |
+| `LOG_PATH` | `<repo>/logs/succl-tests`（相对脚本位置） | 日志根目录（可通过环境变量覆盖） |
 | `MIN_BYTES` | `512` | 起始数据量（需 512 对齐） |
 | `MAX_BYTES` | `1G` | 最大数据量 |
 | `STEP_FACTOR` | `2` | 数据量倍增因子（`STEP_BYTES=0` 时生效） |

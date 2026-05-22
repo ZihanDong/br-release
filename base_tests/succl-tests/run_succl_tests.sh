@@ -44,7 +44,8 @@ SUCCL_BIN_DIR="/opt/succl-tests/bin"
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Override via: LOG_PATH=/your/path ./run_succl_tests.sh ...
-LOG_PATH="${LOG_PATH:-/home/zanedong/br-release/logs/suvs}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_PATH="${LOG_PATH:-${SCRIPT_DIR}/../../logs/succl-tests}"
 
 # ── Data range ────────────────────────────────────────────────────────────────
 MIN_BYTES="512"         # minimum message size in bytes; must be 512-aligned
