@@ -127,35 +127,24 @@ kubectl get runtimeclass biren
 
 若 RuntimeClass 不存在，先执行 **2.2 RuntimeClass 注册**（一次性操作）。
 
-### 2.2 RuntimeClass 注册（首次部署，需要 root）
+### 2.2 RuntimeClass 注册
+
+`join.sh biren` 和 `set-node-mode.sh biren` 会在加入/配置 GPU 节点时**自动创建** RuntimeClass，通常无需手动操作。若集群已存在但缺少 RuntimeClass，手动创建：
 
 ```bash
-# Step 1: 追加 containerd 配置（cri.v1.runtime 节点）
-sudo bash -c "cat >> /etc/containerd/config.toml << 'EOF'
-
-        [plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.biren]
-          runtime_type = \"io.containerd.runc.v2\"
-          sandboxer = \"podsandbox\"
-
-          [plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.biren.options]
-            BinaryName = \"/usr/local/birensupa/container-toolkit/biren-container-toolkit/bin/biren-container-toolkit\"
-            SystemdCgroup = true
-EOF"
-
-# Step 2: 重启 containerd
-sudo systemctl restart containerd && kubectl get nodes
-
-# Step 3: 创建 RuntimeClass
 kubectl apply -f - << 'EOF'
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:
   name: biren
-handler: biren
+handler: runc
 EOF
 ```
 
-> **原理：** 镜像 ENTRYPOINT（`biren_entrypoint.sh`）设置 LD_LIBRARY_PATH 后 `exec "$@"`。k8s YAML 只使用 `args`（不用 `command`），确保 ENTRYPOINT 正常执行，再由 `vllm_server.sh` 启动 vLLM。
+> **架构说明：** RuntimeClass 使用 `handler: runc`（标准 runc），不依赖 biren-container-runtime 注入。GPU 设备和 SDK 库通过以下三项手动配置提供，由 `k8s_yaml_gen.sh` 自动写入 YAML：
+> - `privileged: true` + `BIREN_VISIBLE_DEVICES` 环境变量 — GPU 设备访问
+> - `biren-driver` hostPath volume（`/usr/local/birensupa/driver`）— 提供 `libbesu.so.1` 等 SDK 库，使容器内 `LD_LIBRARY_PATH` 生效
+> - 镜像 ENTRYPOINT（`biren_entrypoint.sh`）`exec "$@"` — k8s YAML 只用 `args` 不用 `command`，确保 ENTRYPOINT 正常执行
 
 ### 2.3 典型工作流
 
@@ -190,17 +179,17 @@ kubectl get svc,endpoints -n vllm
 
 > 若系统配置了 HTTP 代理，需加 `--noproxy "*"`。
 
-**bge-m3（NodePort 30800）：**
+**bge-m3（NodePort 30800，pod 在 brhost-02 = 172.25.198.37）：**
 ```bash
-curl -s --noproxy "*" http://10.49.4.248:30800/v1/embeddings \
+curl -s --noproxy "*" http://172.25.198.37:30800/v1/embeddings \
   -H 'Content-Type: application/json' \
   -d '{"model": "/data/models/BAAI/bge-m3", "input": "Hello, world!"}' \
   | python3 -m json.tool
 ```
 
-**qwen3-32b（NodePort 30801）：**
+**qwen3-32b（NodePort 30801，pod 在 brhost-02 = 172.25.198.37）：**
 ```bash
-curl -s --noproxy "*" http://10.49.4.248:30801/v1/chat/completions \
+curl -s --noproxy "*" http://172.25.198.37:30801/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model": "Qwen/Qwen3-32B", "messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 64}' \
   | python3 -m json.tool
@@ -268,8 +257,9 @@ modelscope_id=<org/repo>
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
+| `ImportError: libbesu.so.1` | `biren-driver` hostPath volume 缺失，`LD_LIBRARY_PATH` 未指向 SDK 库目录 | `k8s_yaml_gen.sh` 已自动添加该 volume；手动检查 YAML 中 `biren-driver` volumeMount 和 volume 是否存在，hostPath 应为 `/usr/local/birensupa/driver` |
 | `ImportError: libsupti.so.1` | ENTRYPOINT 被跳过 | 确认 YAML 只有 `args` 无 `command` |
-| `Failed to infer device type` | biren runtime 未注册 | 重新执行 2.2 步骤 |
+| `Failed to infer device type` | RuntimeClass 未创建或 `BIREN_VISIBLE_DEVICES` 未设置 | 执行 2.2 创建 RuntimeClass；确认 YAML 中有 `BIREN_VISIBLE_DEVICES` env var |
 | Pod 长时间 `0/1 Running` | readiness probe 初始延迟 | 正常，bge-m3 约 2 min，qwen3-32b 约 5 min |
 | NodePort curl 返回 502 | 系统 HTTP 代理干扰 | 加 `--noproxy "*"` |
 | `Failed to parse XXX from YAML` | YAML 不是 k8s_yaml_gen.sh 生成的格式 | 确认 YAML 来自 `k8s_yaml_gen.sh` |

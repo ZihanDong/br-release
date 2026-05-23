@@ -74,8 +74,22 @@ configure_hostname() {
 #   apt-transport-https / gnupg / lsb-release -> not needed on yum-based systems
 install_base_deps() {
     log_info "Installing base dependencies (yum)..."
+
+    # Kylin V10: if /usr/bin/python3 points to a user-compiled Python (e.g. 3.10)
+    # instead of system Python 3.7, dnf/yum silently breaks.  Detect and work around.
+    local _yum="yum"
+    if ! yum --version &>/dev/null 2>&1; then
+        local sys_py3
+        sys_py3=$(ls /usr/bin/python3.{7,8,9} 2>/dev/null | head -1)
+        if [[ -n "${sys_py3}" ]]; then
+            log_warn "yum/dnf non-functional (python3 symlink points to wrong version)."
+            log_warn "Retrying with system python: ${sys_py3}"
+            _yum="${sys_py3} /usr/bin/dnf"
+        fi
+    fi
+
     # Non-fatal: some packages may already be installed or unavailable in limited repos.
-    yum install -y socat conntrack-tools ipset ipvsadm nfs-utils containernetworking-plugins 2>&1 \
+    ${_yum} install -y socat conntrack-tools ipset ipvsadm nfs-utils containernetworking-plugins 2>&1 \
         || log_warn "Some base packages failed to install; continuing..."
     log_info "Base dependencies installed."
 }

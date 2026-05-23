@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 _REGISTRY_SH="${SCRIPT_DIR}/../model_registry.sh"
-CONTAINER_IMAGE='10.49.4.248:32000/infer/birensupa-smartinfer-vllm:26.04.rc2-py310-pt2.8.0-br1xx'
+CONTAINER_IMAGE='172.25.198.36:32000/infer/birensupa-smartinfer-vllm:26.04.rc2-py310-pt2.8.0-br1xx'
 K8S_NAMESPACE='vllm'
 YAML_DIR="${SCRIPT_DIR}/k8s_yaml_gen"
 
@@ -152,6 +152,14 @@ DEPLOY_NAME="vllm-${k8s_name}"
 SVC_NAME="vllm-${k8s_name}"
 
 INNER_SCRIPT="${SCRIPT_DIR}/vllm_server.sh"
+LLM_DIR="$(dirname "${SCRIPT_DIR}")"
+
+# Build BIREN_VISIBLE_DEVICES string: e.g. "0,1" for gpu_needed=2
+_biren_visible=""
+for (( _i=0; _i<gpu_needed; _i++ )); do
+    [[ -n "$_biren_visible" ]] && _biren_visible="${_biren_visible},"
+    _biren_visible="${_biren_visible}${_i}"
+done
 
 # ── Write YAML ─────────────────────────────────────────────────────────────────
 mkdir -p "$YAML_DIR"
@@ -185,7 +193,8 @@ spec:
         app: ${APP_LABEL}
         model: ${model_weights}
     spec:
-      # biren-container-runtime sets BIREN_VISIBLE_DEVICES and SDK library paths
+      # RuntimeClass 'biren' uses handler: runc (standard runc + manual workarounds below).
+      # GPU devices: privileged + BIREN_VISIBLE_DEVICES.  SDK libs: biren-driver hostPath volume.
       runtimeClassName: biren
       nodeName: ${NODE_NAME}
       containers:
@@ -205,6 +214,8 @@ spec:
           value: spawn
         - name: VLLM_BR_WEIGHT_TYPE
           value: NUMA
+        - name: BIREN_VISIBLE_DEVICES
+          value: "${_biren_visible}"
         ports:
         - name: http
           containerPort: ${port}
@@ -219,6 +230,7 @@ spec:
             cpu: "${cpu_lim}"
             memory: "${mem_lim_gi}Gi"
         securityContext:
+          privileged: true
           capabilities:
             add:
             - IPC_LOCK
@@ -250,6 +262,15 @@ spec:
         - name: patch-parameter
           mountPath: /usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/parameter.py
           readOnly: true
+        - name: model-registry
+          mountPath: ${LLM_DIR}/model_registry.sh
+          readOnly: true
+        - name: model-registry-conf
+          mountPath: ${LLM_DIR}/model_registry.conf
+          readOnly: true
+        - name: biren-driver
+          mountPath: /usr/local/birensupa/driver
+          readOnly: true
       volumes:
       - name: dshm
         emptyDir:
@@ -267,6 +288,18 @@ spec:
         hostPath:
           path: ${SCRIPT_DIR}/patches/vllm_br_parameter.py
           type: File
+      - name: model-registry
+        hostPath:
+          path: ${LLM_DIR}/model_registry.sh
+          type: File
+      - name: model-registry-conf
+        hostPath:
+          path: ${LLM_DIR}/model_registry.conf
+          type: File
+      - name: biren-driver
+        hostPath:
+          path: /usr/local/birensupa/driver
+          type: Directory
 
 ---
 apiVersion: v1

@@ -129,6 +129,11 @@ Additional variables:
 | `NODE_LABELS` | — | Comma-separated extra labels, e.g. `zone=cn-east` |
 | `PLUGIN_DIR` | `packages/biren/` | (biren only) Directory containing `*.tar` image and `biren-device-plugin.yaml` |
 
+**`join.sh biren` auto-configures:**
+- Creates `/usr/bin/biren-container-runtime` symlink (via `biren-containerd-configure` or manual fallback)
+- Registers biren runtime in containerd config (idempotent)
+- Creates k8s RuntimeClass `biren` with `handler: runc` (if admin.conf available)
+
 ---
 
 ## 2 — Node Mode Management
@@ -421,6 +426,7 @@ ls /etc/kubernetes 2>/dev/null || echo "dir removed"
 | containerd v2 plugin path error | Wrong config key | Use `io.containerd.cri.v1.runtime` (v2), not `io.containerd.grpc.v1.cri` (v1) |
 | GPU count 0 after `biren` mode | Device plugin registers ~30s after rollout | Wait and re-run verification |
 | `libbiren-ml.so.1` not found in container | Absolute symlink not mounted | `set-node-mode.sh` patches hostPath automatically via `realpath`; if deployed externally, trace the symlink chain manually |
+| **vLLM:** `ImportError: libbesu.so.1` in pod | `biren-driver` hostPath volume missing — `LD_LIBRARY_PATH` never set for SDK libs | `k8s_yaml_gen.sh` auto-adds `biren-driver` volume (hostPath `/usr/local/birensupa/driver`); check YAML contains it |
 | DaemonSet pod stuck `Pending` | Missing GPU label | Re-run `set-node-mode.sh biren` |
 | `ImagePullBackOff` on workers | Trust config not injected | Run `registry-trust.sh apply <node>` on master |
 | `ctr push` fails unauthorized | Missing `--plain-http` for HTTP registry | Add `--plain-http` flag |

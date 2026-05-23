@@ -128,6 +128,11 @@ _patch_existing_config() {
         sed -i "s|sandbox_image = .*|sandbox_image = \"${pause_image}\"|g" "${cfg}"
     fi
 
+    # Enable certs.d so registry trust (hosts.toml) files are actually read.
+    # containerd ships with config_path = "" which silently ignores certs.d/.
+    sed -i 's|config_path\s*=\s*""|config_path = "/etc/containerd/certs.d"|g' "${cfg}"
+    mkdir -p /etc/containerd/certs.d
+
     log_info "Config patched: ${cfg}  (backup saved as ${cfg}.bak.*)"
 }
 
@@ -154,6 +159,10 @@ _write_fresh_config() {
         sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' "${CONTAINERD_CONFIG}"
         sed -i "s|sandbox_image = .*|sandbox_image = \"${pause_image}\"|" "${CONTAINERD_CONFIG}"
     fi
+
+    # Enable certs.d so registry trust (hosts.toml) files are actually read.
+    sed -i 's|config_path\s*=\s*""|config_path = "/etc/containerd/certs.d"|g' "${CONTAINERD_CONFIG}"
+    mkdir -p /etc/containerd/certs.d
 
     log_info "containerd config written: ${CONTAINERD_CONFIG}"
 }

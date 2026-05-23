@@ -210,9 +210,75 @@ apply_worker_role() {
     fi
 }
 
+# ── 配置 biren 容器运行时（containerd + RuntimeClass）──────────────────────────
+_configure_biren_runtime() {
+    # 1a. 创建 /usr/bin/biren-container-runtime 软链接（biren-containerd-configure 需要）
+    local bin_path="/usr/bin/biren-container-runtime"
+    local real_bin
+    real_bin=$(find /usr/local/birensupa -name "biren-container-runtime" -type f 2>/dev/null | head -1)
+    if [[ -n "${real_bin}" ]]; then
+        if [[ ! -e "${bin_path}" ]]; then
+            ln -sf "${real_bin}" "${bin_path}"
+            log_info "已创建 biren-container-runtime 软链接: ${bin_path} -> ${real_bin}"
+        else
+            log_info "biren-container-runtime 已存在: ${bin_path}"
+        fi
+    else
+        log_warn "未找到 biren-container-runtime 二进制文件，跳过软链接创建。"
+    fi
+
+    # 1b. 向 containerd 注册 biren 运行时（幂等）
+    local cfg="/etc/containerd/config.toml"
+    if ! grep -q 'runtimes\.biren\|runtimes\."biren"' "${cfg}" 2>/dev/null; then
+        if command -v biren-containerd-configure &>/dev/null; then
+            biren-containerd-configure configure 2>&1 && log_info "biren 运行时已注册到 containerd" \
+                || log_warn "biren-containerd-configure 执行失败，请手动配置 containerd。"
+        elif [[ -e "${bin_path}" ]]; then
+            # 手动追加（biren-containerd-configure 不可用时的备用）
+            cat >> "${cfg}" <<EOF
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.biren]
+  runtime_type = "io.containerd.runc.v2"
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.biren.options]
+    BinaryName = "${bin_path}"
+    SystemdCgroup = true
+EOF
+            log_info "已手动追加 biren 运行时配置到 containerd。"
+        else
+            log_warn "biren-containerd-configure 和二进制文件均未找到，跳过运行时注册。"
+        fi
+        systemctl restart containerd && log_info "containerd 已重启。" \
+            || log_warn "containerd 重启失败，请手动执行 systemctl restart containerd。"
+    else
+        log_info "biren 运行时已在 containerd 中配置，跳过。"
+    fi
+
+    # 1c. 在 k8s 中创建 RuntimeClass（需要 admin 权限）
+    if [[ -f "${KUBECONFIG}" ]]; then
+        if ! kubectl --kubeconfig "${KUBECONFIG}" get runtimeclass biren &>/dev/null; then
+            kubectl --kubeconfig "${KUBECONFIG}" apply -f - <<EOF
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: biren
+handler: runc
+EOF
+            log_info "RuntimeClass 'biren' 已创建。"
+        else
+            log_info "RuntimeClass 'biren' 已存在，跳过。"
+        fi
+    else
+        log_warn "未找到 ${KUBECONFIG}，跳过 RuntimeClass 创建。"
+        log_warn "请在 Master 上手动创建 RuntimeClass 'biren'（handler: runc）。"
+    fi
+}
+
 # ── 设置 biren 角色 ───────────────────────────────────────────────────────────
 apply_biren_role() {
     local node_name="${NODE_NAME:-$(hostname -s)}"
+
+    # 0. 配置 containerd biren 运行时和 k8s RuntimeClass
+    _configure_biren_runtime
 
     # 1. 在本机导入 device plugin 镜像
     _load_plugin_image

@@ -143,40 +143,24 @@ curl -s http://127.0.0.1:28800/v1/chat/completions \
 
 | 组件 | 版本/状态 |
 |------|---------|
-| k8s | v1.30+，节点处于 `biren` 模式 |
-| containerd | v2.x，已注册 `biren` RuntimeClass（见下） |
+| k8s | v1.25+，节点处于 `biren` 模式 |
+| containerd | v1.7+，已注册 `biren` RuntimeClass |
 | biren device plugin | DaemonSet 运行中（`biren-gpu` namespace） |
-| 私有 Registry | `10.49.4.248:32000`（镜像已导入） |
+| 私有 Registry | `172.25.198.36:32000`（镜像已导入） |
 
-**RuntimeClass 注册**（首次部署一次性操作，已完成）：
-
-containerd v2.x 的 `cri.v1.runtime` 插件需要单独注册 biren runtime handler：
+**RuntimeClass 注册**：`join.sh biren` 和 `set-node-mode.sh biren` 会自动完成，通常无需手动执行。若需手动创建：
 
 ```bash
-# Step 1: 追加 containerd 配置
-sudo bash -c "cat >> /etc/containerd/config.toml << 'EOF'
-
-        [plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.biren]
-          runtime_type = \"io.containerd.runc.v2\"
-          sandboxer = \"podsandbox\"
-
-          [plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.biren.options]
-            BinaryName = \"/usr/local/birensupa/container-toolkit/biren-container-toolkit/bin/biren-container-runtime\"
-            SystemdCgroup = true
-EOF"
-
-# Step 2: 重启 containerd
-sudo systemctl restart containerd
-
-# Step 3: 创建 RuntimeClass
 kubectl apply -f - << 'EOF'
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:
   name: biren
-handler: biren
+handler: runc
 EOF
 ```
+
+> **注意：** RuntimeClass 使用 `handler: runc`（标准 runc），GPU 设备访问通过 `privileged: true` + `BIREN_VISIBLE_DEVICES` 环境变量实现，SDK 库路径通过 `biren-driver` hostPath volume（`/usr/local/birensupa/driver`）挂载提供——`k8s_yaml_gen.sh` 自动将这三项写入生成的 YAML。
 
 ### 2.2 典型工作流
 
@@ -228,14 +212,14 @@ bash k8s_yaml_gen.sh qwen3-32b && bash test_k8s.sh k8s_yaml_gen/qwen3-32b.yaml
 > 若系统配置了 HTTP 代理（`http_proxy`），需添加 `--noproxy "*"` 参数。
 
 ```bash
-# bge-m3
-curl -s --noproxy "*" http://10.49.4.248:30800/v1/embeddings \
+# bge-m3（brhost-02 = 172.25.198.37，NodePort 30800）
+curl -s --noproxy "*" http://172.25.198.37:30800/v1/embeddings \
   -H 'Content-Type: application/json' \
   -d '{"model": "/data/models/BAAI/bge-m3", "input": "Hello, world!"}' \
   | python3 -m json.tool
 
-# qwen3-32b
-curl -s --noproxy "*" http://10.49.4.248:30801/v1/chat/completions \
+# qwen3-32b（brhost-02 = 172.25.198.37，NodePort 30801）
+curl -s --noproxy "*" http://172.25.198.37:30801/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model": "Qwen/Qwen3-32B", "messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 64}' \
   | python3 -m json.tool

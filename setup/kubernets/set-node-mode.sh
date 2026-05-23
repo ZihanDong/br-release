@@ -262,9 +262,25 @@ mode_cpu() {
     done
 }
 
+_ensure_biren_runtime_class() {
+    if ! kubectl get runtimeclass biren &>/dev/null 2>&1; then
+        kubectl apply -f - <<EOF
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: biren
+handler: runc
+EOF
+        log_info "RuntimeClass 'biren' 已创建。"
+    else
+        log_info "RuntimeClass 'biren' 已存在，跳过。"
+    fi
+}
+
 mode_biren() {
     log_info "── 模式: biren（BirenTech GPU 算力节点）──"
 
+    _ensure_biren_runtime_class
     load_plugin_image
     deploy_plugin
 
