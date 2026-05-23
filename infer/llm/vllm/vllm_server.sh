@@ -15,7 +15,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODEL_REGISTRY="${SCRIPT_DIR}/../model_registry.conf"
+_REGISTRY_SH="${SCRIPT_DIR}/../model_registry.sh"
 
 _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
 _ok()   { echo -e "\033[1;32m[ OK ]\033[0m  $*"; }
@@ -77,24 +77,14 @@ source "$CONFIG_FILE"
 _info "Config      : $(basename "$CONFIG_FILE")"
 _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
 
-# ── Registry lookup ────────────────────────────────────────────────────────────
-[[ ! -f "$MODEL_REGISTRY" ]] && { _err "Registry not found: $MODEL_REGISTRY"; exit 1; }
+# ── Registry lookup (via model_registry.sh) ───────────────────────────────────
+[[ ! -f "$_REGISTRY_SH" ]] && { _err "model_registry.sh not found: $_REGISTRY_SH"; exit 1; }
+# shellcheck source=../model_registry.sh
+source "$_REGISTRY_SH"
+parse_model "$model_weights" || exit 1
+MODEL_LOCAL_PATH="$MODEL_PATH"
 
-registry_get() {
-    awk -v sec="[$1]" -v fld="$2" '
-        /^\[/ { cur = $0 }
-        cur == sec && match($0, "^" fld "=") { print substr($0, length(fld)+2); exit }
-    ' "$MODEL_REGISTRY"
-}
-
-MODEL_LOCAL_PATH=$(registry_get "$model_weights" "local_path")
-MODEL_HF_ID=$(registry_get "$model_weights" "huggingface_id")
-MODEL_MS_ID=$(registry_get "$model_weights" "modelscope_id")
-
-[[ -z "$MODEL_HF_ID$MODEL_MS_ID" ]] && {
-    _err "Model '$model_weights' not found in $MODEL_REGISTRY"; exit 1; }
-
-_info "Registry    : local=${MODEL_LOCAL_PATH:-(not set)}  hf=$MODEL_HF_ID  ms=$MODEL_MS_ID"
+_info "Registry    : path=$MODEL_LOCAL_PATH  download=$DOWNLOAD_NAME  status=$DIR_STATUS"
 
 # Weights must already exist — download should happen on the host before container start
 [[ ! -d "${MODEL_LOCAL_PATH}" ]] && {

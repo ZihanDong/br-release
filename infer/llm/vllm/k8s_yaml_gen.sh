@@ -18,8 +18,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-MODEL_REGISTRY="${SCRIPT_DIR}/../model_registry.conf"
-CONTAINER_IMAGE='10.49.4.248:32000/infer/birensupa-smartinfer-vllm:26.05.14-py310-pt2.8.0-br1xx'
+_REGISTRY_SH="${SCRIPT_DIR}/../model_registry.sh"
+CONTAINER_IMAGE='10.49.4.248:32000/infer/birensupa-smartinfer-vllm:26.04.rc2-py310-pt2.8.0-br1xx'
 K8S_NAMESPACE='vllm'
 YAML_DIR="${SCRIPT_DIR}/k8s_yaml_gen"
 
@@ -87,46 +87,34 @@ source "$CONFIG_FILE"
 _info "Config      : $(basename "$CONFIG_FILE")"
 _info "Model key   : $model_weights  |  port=$port  |  nodeport=$k8s_nodeport  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
 
-# ── Registry lookup ────────────────────────────────────────────────────────────
-[[ ! -f "$MODEL_REGISTRY" ]] && { _err "Registry not found: $MODEL_REGISTRY"; exit 1; }
+# ── Registry lookup (via model_registry.sh) ───────────────────────────────────
+[[ ! -f "$_REGISTRY_SH" ]] && { _err "model_registry.sh not found: $_REGISTRY_SH"; exit 1; }
+# shellcheck source=../model_registry.sh
+source "$_REGISTRY_SH"
+parse_model "$model_weights" || exit 1
+MODEL_LOCAL_PATH="$MODEL_PATH"
 
-registry_get() {
-    awk -v sec="[$1]" -v fld="$2" '
-        /^\[/ { cur = $0 }
-        cur == sec && match($0, "^" fld "=") { print substr($0, length(fld)+2); exit }
-    ' "$MODEL_REGISTRY"
-}
-
-MODEL_LOCAL_PATH=$(registry_get "$model_weights" "local_path")
-MODEL_HF_ID=$(registry_get "$model_weights" "huggingface_id")
-MODEL_MS_ID=$(registry_get "$model_weights" "modelscope_id")
-
-[[ -z "$MODEL_HF_ID$MODEL_MS_ID" ]] && {
-    _err "Model '$model_weights' not found in $MODEL_REGISTRY"; exit 1; }
-
-_info "Registry    : local=${MODEL_LOCAL_PATH:-(not set)}  hf=$MODEL_HF_ID  ms=$MODEL_MS_ID"
+_info "Registry    : path=$MODEL_LOCAL_PATH  download=$DOWNLOAD_NAME  status=$DIR_STATUS"
 
 # ── Weight check / download (before generating YAML) ──────────────────────────
-if [[ -n "$MODEL_LOCAL_PATH" && -d "$MODEL_LOCAL_PATH" ]]; then
+if [[ "$DIR_STATUS" == "ok" ]]; then
     _ok "Weights     : $MODEL_LOCAL_PATH"
 else
-    _warn "Local weights not found (${MODEL_LOCAL_PATH:-(path not configured)})"
+    _warn "Local weights not found (${MODEL_LOCAL_PATH:-(path not configured)}, status: $DIR_STATUS)"
     read -rp "  Download now? [y/N]: " yn
     if [[ ! "$yn" =~ ^[Yy]$ ]]; then
         _err "Cannot generate YAML without model weights. Exiting."; exit 1
     fi
     echo "  Download source:"
-    echo "    1) modelscope  —  modelscope download --model $MODEL_MS_ID"
-    echo "    2) huggingface —  huggingface-cli download $MODEL_HF_ID"
+    echo "    1) modelscope  —  modelscope download --model $DOWNLOAD_NAME --local_dir $MODEL_LOCAL_PATH"
+    echo "    2) huggingface —  huggingface-cli download $DOWNLOAD_NAME --local-dir $MODEL_LOCAL_PATH"
     read -rp "  Choose [1/2]: " src
-    DEST="${MODEL_LOCAL_PATH:-/data/models/${MODEL_HF_ID}}"
-    mkdir -p "$(dirname "$DEST")"
+    mkdir -p "$MODEL_LOCAL_PATH"
     case "$src" in
-        1) modelscope download --model "$MODEL_MS_ID" --local_dir "$DEST" ;;
-        2) huggingface-cli download "$MODEL_HF_ID" --local-dir "$DEST" ;;
+        1) modelscope download --model "$DOWNLOAD_NAME" --local_dir "$MODEL_LOCAL_PATH" ;;
+        2) huggingface-cli download "$DOWNLOAD_NAME" --local-dir "$MODEL_LOCAL_PATH" ;;
         *) _err "Invalid choice."; exit 1 ;;
     esac
-    MODEL_LOCAL_PATH="$DEST"
     _ok "Downloaded  : $MODEL_LOCAL_PATH"
 fi
 
@@ -259,9 +247,6 @@ spec:
         - name: vllm-scripts
           mountPath: ${SCRIPT_DIR}
           readOnly: true
-        - name: patch-fused-moe
-          mountPath: /usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/layers/fused_moe/layer.py
-          readOnly: true
         - name: patch-parameter
           mountPath: /usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/parameter.py
           readOnly: true
@@ -278,10 +263,6 @@ spec:
         hostPath:
           path: ${SCRIPT_DIR}
           type: Directory
-      - name: patch-fused-moe
-        hostPath:
-          path: ${SCRIPT_DIR}/patches/vllm_br_fused_moe_layer.py
-          type: File
       - name: patch-parameter
         hostPath:
           path: ${SCRIPT_DIR}/patches/vllm_br_parameter.py
