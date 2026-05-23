@@ -10,7 +10,7 @@ CONTAINER_NAME="biren_suvs"
 
 # Tasks to run. "all" runs every task in ALL_TASKS below.
 # Multiple tasks: space- or comma-separated  (e.g. "pcie,membw,hbm0")
-DEFAULT_TASKS="all"
+DEFAULT_TASKS="base"
 
 # GPU IDs for test actions. "all" = conf default.  Specific: "0" or "0,1,2"
 # GM monitoring always covers all GPUs regardless of this setting.

@@ -3,12 +3,12 @@
 set -euo pipefail
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
-SDK_ROOT_PATH="/data/release/2602rc2/"
+SDK_ROOT_PATH="/data/release/2604rc2/"
 SUDCGM_PACKAGE="packages/ubuntu-22.04/sudcgm_*.run"
 BASE_IMAGE="images/birensupa-sdk-*.tar"
 
 CONTAINER_NAME="biren_suvs"
-IMAGE_NAME="birensupa-sdk:26.02.rc2-br1xx"
+IMAGE_NAME="birensupa-sdk:26.04.rc2-br1xx"
 # ───────────────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

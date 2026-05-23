@@ -53,8 +53,8 @@ sudo bash base_tests/suvs/run_suvs.sh --tasks base --gpu-ids 2,3,4,5,6,7 --durat
 ### 主要配置变量（脚本顶部）
 
 ```bash
-SDK_ROOT_PATH="/data/release/2602rc2/"   # SDK 根目录
-IMAGE_NAME="birensupa-sdk:26.02.rc2-br1xx"
+SDK_ROOT_PATH="/data/release/2604rc2/"   # SDK 根目录
+IMAGE_NAME="birensupa-sdk:26.04.rc2-br1xx"
 CONTAINER_NAME="biren_suvs"
 ```
 
