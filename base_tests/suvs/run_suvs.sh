@@ -164,6 +164,19 @@ hdr() {
     printf '%s\n' "$(printf '═%.0s' {1..72})" | tee -a "$SUMMARY_LOG"
 }
 
+# _clamp_dur <task> <requested_dur> <min_dur>
+# Returns the effective duration: if requested < min, warns (stderr) and returns min.
+_clamp_dur() {
+    local task="$1" req="${2:-}" min="${3:-90}"
+    if [[ -n "$req" && "$req" =~ ^[0-9]+$ ]] && (( req < min )); then
+        echo "WARNING: Task '${task}' requires duration >= ${min}s (suvs will error on shorter runs)." \
+             "Requested ${req}s → using ${min}s." >&2
+        echo "$min"
+    else
+        echo "${req:-$min}"
+    fi
+}
+
 # generate_conf <task> <gpu_id> <duration_override>
 # Writes the complete suvs YAML conf (wrapped with GM start/stop) to stdout.
 generate_conf() {
@@ -222,7 +235,7 @@ YAML
 YAML
             ;;
         membw)
-            local d="${dur:-90}"
+            local d; d="$(_clamp_dur "$task" "$dur" 90)"
             cat <<YAML
 - name: test_membw
   gpu_id: ${gpu_id}
@@ -248,7 +261,7 @@ YAML
 YAML
             ;;
         power_pct50)
-            local d="${dur:-90}"
+            local d; d="$(_clamp_dur "$task" "$dur" 90)"
             cat <<YAML
 - name: test_power_pct50
   gpu_id: ${gpu_id}
@@ -258,7 +271,7 @@ YAML
 YAML
             ;;
         power_idle)
-            local d="${dur:-90}"
+            local d; d="$(_clamp_dur "$task" "$dur" 90)"
             cat <<YAML
 - name: test_power_idle
   gpu_id: ${gpu_id}
@@ -271,7 +284,7 @@ YAML
             ;;
         spcstress_*)
             local stype="${task#spcstress_}"
-            local d="${dur:-90}"
+            local d; d="$(_clamp_dur "$task" "$dur" 90)"
             cat <<YAML
 - name: test_spcstress_${stype}
   gpu_id: ${gpu_id}
@@ -283,7 +296,7 @@ YAML
             ;;
         spcperf_*)
             local stype="${task#spcperf_}"
-            local d="${dur:-90}"
+            local d; d="$(_clamp_dur "$task" "$dur" 90)"
             cat <<YAML
 - name: test_spcperf_${stype}
   gpu_id: ${gpu_id}
@@ -331,6 +344,134 @@ extract_summary() {
         || tail -5 "$log_file"
 }
 
+# extract_gpu_stats <log_file> <gpu_ids>
+# Parses [gm_start] monitoring lines; filters to active GPUs (per gpu_ids);
+# prints a per-GPU averages table plus cross-GPU average row to stdout.
+extract_gpu_stats() {
+    local log_file="$1"
+    local gpu_ids="${2:-all}"
+
+    [[ -f "$log_file" ]] || return 0
+    grep -q '\[gm_start\] gm, gpu' "$log_file" 2>/dev/null || return 0
+
+    awk -v gpu_ids="$gpu_ids" '
+BEGIN {
+    use_all = (gpu_ids == "all")
+    if (!use_all) {
+        n = split(gpu_ids, gtmp, /[, ]+/)
+        for (i = 1; i <= n; i++) allowed[gtmp[i]] = 1
+    }
+    ngpus = 0; nkeys = 0
+}
+/\[gm_start\] gm, gpu[0-9]+:/ {
+    pos = index($0, "gm, gpu")
+    if (!pos) next
+    rest = substr($0, pos + 7)
+    match(rest, /^[0-9]+/)
+    if (RLENGTH <= 0) next
+    gid = substr(rest, 1, RLENGTH)
+
+    if (!use_all && !(gid in allowed)) next
+
+    if (!(gid in gid_seen)) {
+        gid_seen[gid] = 1
+        gpu_arr[ngpus++] = gid
+    }
+
+    prefix = "gm, gpu" gid ": "
+    mstart = index($0, prefix)
+    if (!mstart) next
+    mstr = substr($0, mstart + length(prefix))
+    # Skip lines where metrics portion is not valid (e.g. debug output mixed in)
+    if (mstr !~ /^[a-zA-Z0-9_-]+:[0-9]/) next
+
+    nf = split(mstr, flds, /; ?/)
+    for (i = 1; i <= nf; i++) {
+        f = flds[i]
+        gsub(/^[ \t]+/, "", f); gsub(/[ \t;]+$/, "", f)
+        if (f == "") continue
+        ci = index(f, ":")
+        if (!ci) continue
+        key = substr(f, 1, ci - 1)
+        # Skip fields with non-standard key names (e.g. from interleaved debug output)
+        if (key !~ /^[a-zA-Z0-9_][-a-zA-Z0-9_]*$/) continue
+        vraw = substr(f, ci + 1)
+        num = vraw + 0
+        match(vraw, /^[0-9]+/)
+        unit = (RLENGTH > 0) ? substr(vraw, RLENGTH + 1) : ""
+        gsub(/[; \t]+$/, "", unit)
+
+        idx = gid SUBSEP key
+        sum_v[idx] += num
+        cnt_v[idx]++
+        if (!(key in key_seen)) {
+            key_seen[key] = 1
+            key_arr[nkeys++] = key
+        }
+        if (!(key in unit_map)) unit_map[key] = unit
+    }
+}
+END {
+    if (ngpus == 0) exit
+    cw0 = 10; cw = 10
+    printf "  GPU Stats (active GPUs, averaged over monitoring period):\n"
+    hdr = sprintf("  %-*s", cw0, "GPU")
+    for (ki = 0; ki < nkeys; ki++) {
+        k = key_arr[ki]; d = k
+        if (d == "core_clock")         d = "core_clk"
+        if (d == "mem_clock")          d = "mem_clk"
+        if (d == "pcie_link_speed")    d = "pcie_spd"
+        if (d == "pcie_replay_count")  d = "replay"
+        if (d == "gpu_temp")           d = "temp"
+        if (d == "1-bit_ecc")          d = "ecc1b"
+        if (d == "2-bit_ecc")          d = "ecc2b"
+        hdr = hdr sprintf("  %-*s", cw, d)
+    }
+    totw = cw0 + nkeys * (cw + 2)
+    sep = "  "; for (j = 0; j < totw; j++) sep = sep "-"
+    printf "%s\n%s\n", hdr, sep
+    for (gi = 0; gi < ngpus; gi++) {
+        gid = gpu_arr[gi]
+        row = sprintf("  %-*s", cw0, "gpu" gid)
+        for (ki = 0; ki < nkeys; ki++) {
+            k = key_arr[ki]
+            idx = gid SUBSEP k
+            if ((idx in sum_v) && cnt_v[idx] > 0) {
+                avg = sum_v[idx] / cnt_v[idx]
+                u = unit_map[k]
+                cell = (avg == int(avg)) ? sprintf("%d%s", int(avg), u) \
+                                         : sprintf("%.1f%s", avg, u)
+            } else { cell = "N/A" }
+            row = row sprintf("  %-*s", cw, cell)
+        }
+        printf "%s\n", row
+    }
+    if (ngpus > 1) {
+        printf "%s\n", sep
+        row = sprintf("  %-*s", cw0, "-- avg --")
+        for (ki = 0; ki < nkeys; ki++) {
+            k = key_arr[ki]; total = 0; valid = 0
+            for (gi = 0; gi < ngpus; gi++) {
+                idx = gpu_arr[gi] SUBSEP k
+                if ((idx in sum_v) && cnt_v[idx] > 0) {
+                    total += sum_v[idx] / cnt_v[idx]; valid++
+                }
+            }
+            if (valid > 0) {
+                avg = total / valid
+                u = unit_map[k]
+                cell = (avg == int(avg)) ? sprintf("%d%s", int(avg), u) \
+                                         : sprintf("%.1f%s", avg, u)
+            } else { cell = "N/A" }
+            row = row sprintf("  %-*s", cw, cell)
+        }
+        printf "%s\n", row
+    }
+    printf "\n"
+}
+' "$log_file"
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RUN TASKS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -364,7 +505,7 @@ for task in $TASKS; do
     docker exec "$CONTAINER_NAME" bash -c "
         source /usr/local/birensupa/sudcgm/latest/scripts/brsw_set_env.sh 2>/dev/null || true
         cd '${SUVS_BIN}'
-        suvs -c '${rel_conf}' ${VERBOSE_FLAG} 2>&1
+        suvs -c '${rel_conf}' ${VERBOSE_FLAG} -d 3 2>&1
     " | tee "$task_log"
     SUVS_RC=${PIPESTATUS[0]}
     set -e
@@ -397,6 +538,7 @@ for task in $TASKS; do
             printf '  %s\n' "$line"
         done <<< "${TASK_SUMMARY[$task]}"
     fi
+    extract_gpu_stats "${RUN_LOG_DIR}/${task}.log" "$GPU_IDS"
     printf '\n'
 done
 
