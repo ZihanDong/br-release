@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# Launch a BirenTech Docker container and start vLLM via vllm_server.sh inside it.
+# Launch a BirenTech Docker container for vLLM serving.
 #
 # Usage:
-#   sudo bash run_docker.sh <config_file>
+#   sudo bash run_docker.sh [--run] <config_file>
+#
+#   (default)  Start the container, write a server run script to the log
+#              directory, then enter an interactive shell there.  The user
+#              starts the server manually:  bash run_vllm_<model>_server.sh
+#
+#   --run      Write the run script, then exec the server directly (no
+#              interactive shell).  Polls /health and prints test commands
+#              once the server is ready.
 #
 # config_file may be:
 #   - a bare model name: bge-m3  (resolved to configs/bge-m3.conf)
 #   - a relative path:   configs/bge-m3.conf
 #   - an absolute path:  /path/to/any.conf
 #
-# The script:
-#   1. Selects free BirenTech GPUs via brsmi
-#   2. Starts the container (maps only the required /dev/biren/card_N devices)
-#   3. Inside the container, calls vllm_server.sh to launch vLLM
-#   4. Polls /health until the server is ready
-#
-# /home is bind-mounted into the container so vllm_server.sh, model_registry.conf,
-# and configs/ are accessible at the same paths as on the host.
+# /home and /data are bind-mounted so vllm_server.sh, model weights, and
+# configs are accessible at the same paths inside the container.
 
 set -euo pipefail
 
@@ -45,7 +47,10 @@ fi
 
 usage() {
     echo ""
-    echo "Usage: $0 <config_file>"
+    echo "Usage: $0 [--run] <config_file>"
+    echo ""
+    echo "  (default)  Enter interactive shell; start server manually inside"
+    echo "  --run      Write run script then exec server directly (no interactive shell)"
     echo ""
     echo "Available configs:"
     for f in "${SCRIPT_DIR}/configs/"*.conf; do
@@ -55,10 +60,21 @@ usage() {
     exit 1
 }
 
-# ── Resolve config ─────────────────────────────────────────────────────────────
-[[ $# -lt 1 ]] && { _err "A config file is required."; usage; }
+# ── Parse arguments ────────────────────────────────────────────────────────────
+RUN_MODE=false
+CONFIG_ARG=""
 
-CONFIG_ARG="$1"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --run) RUN_MODE=true; shift ;;
+        -*)    _err "Unknown option: $1"; usage ;;
+        *)     CONFIG_ARG="$1"; shift ;;
+    esac
+done
+
+[[ -z "$CONFIG_ARG" ]] && { _err "A config file is required."; usage; }
+
+# ── Resolve config ─────────────────────────────────────────────────────────────
 CONFIG_FILE=""
 
 if [[ "$CONFIG_ARG" == /* ]]; then
@@ -95,7 +111,7 @@ source "$CONFIG_FILE"
 
 [[ -z "$model_weights" ]] && { _err "model_weights not set in $(basename "$CONFIG_FILE")"; exit 1; }
 
-_info "Config      : $(basename "$CONFIG_FILE")"
+_info "Config      : $(basename "$CONFIG_FILE")  [mode=$( $RUN_MODE && echo --run || echo interactive)]"
 _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
 
 # ── Registry lookup (via model_registry.sh) ───────────────────────────────────
@@ -162,6 +178,7 @@ mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 LOG_FILE="${LOG_DIR}/vllm_${model_weights}_${TIMESTAMP}.log"
 CONTAINER_NAME="vllm_${model_weights}"
+INNER_SCRIPT="${SCRIPT_DIR}/vllm_server.sh"
 
 if $DOCKER_CMD inspect "$CONTAINER_NAME" &>/dev/null; then
     _warn "Removing existing container: $CONTAINER_NAME"
@@ -169,17 +186,18 @@ if $DOCKER_CMD inspect "$CONTAINER_NAME" &>/dev/null; then
 fi
 
 _info "Container   : $CONTAINER_NAME"
-_info "Log file    : $LOG_FILE"
+_info "Log dir     : $LOG_DIR"
 echo ""
 
 $DOCKER_CMD image inspect "$CONTAINER_IMAGE" &>/dev/null || {
     _err "Docker image not found: $CONTAINER_IMAGE"
     _err "Pull or build the image first."; exit 1; }
 
-# ── Start container ────────────────────────────────────────────────────────────
-# /home is bind-mounted so SCRIPT_DIR and CONFIG_FILE are at the same paths inside the container.
-# The image ENTRYPOINT (biren_entrypoint.sh) runs first to set LD_LIBRARY_PATH, then exec's args.
-INNER_SCRIPT="${SCRIPT_DIR}/vllm_server.sh"
+# ── Start container (sleep infinity — server started separately below) ─────────
+# /home is bind-mounted so SCRIPT_DIR, CONFIG_FILE, and LOG_DIR are accessible
+# inside the container at the same paths.
+# The image ENTRYPOINT (biren_entrypoint.sh) runs first to set LD_LIBRARY_PATH,
+# then exec's sleep — making LD_LIBRARY_PATH available via /proc/1/environ.
 
 # shellcheck disable=SC2086
 $DOCKER_CMD run -d \
@@ -194,58 +212,125 @@ $DOCKER_CMD run -d \
     $device_args \
     -e "BIREN_VISIBLE_DEVICES=${biren_visible}" \
     "$CONTAINER_IMAGE" \
-    bash -c "bash '${INNER_SCRIPT}' '${CONFIG_FILE}' 2>&1 | tee '${LOG_FILE}'" >/dev/null
+    sleep infinity >/dev/null
 
-_ok "Container started. Waiting for server on port $port..."
-echo "  (tail -f ${LOG_FILE}  or  ${DOCKER_CMD} logs -f ${CONTAINER_NAME})"
+_ok "Container started."
 echo ""
 
-# ── Poll /health ───────────────────────────────────────────────────────────────
-READY=false
-for _ in $(seq 1 120); do
-    if curl -sf "http://127.0.0.1:${port}/health" &>/dev/null; then
-        READY=true; break
+# ── Write server run script into LOG_DIR ──────────────────────────────────────
+# LOG_DIR is on /home which is bind-mounted, so writing here on the host
+# makes the file immediately visible inside the container at the same path.
+# The script reads LD_LIBRARY_PATH from PID 1 (/proc/1/environ) to bridge
+# the gap: docker exec sessions don't inherit runtime env set by the ENTRYPOINT.
+
+RUN_SCRIPT_NAME="run_vllm_${model_weights}_server.sh"
+RUN_SCRIPT_PATH="${LOG_DIR}/${RUN_SCRIPT_NAME}"
+
+cat > "${RUN_SCRIPT_PATH}" <<'RUNSCRIPT'
+#!/usr/bin/env bash
+_ld=$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^LD_LIBRARY_PATH=//p' | head -1)
+[[ -n "$_ld" ]] && export LD_LIBRARY_PATH="$_ld"
+unset _ld
+exec bash "__INNER_SCRIPT__" "__CONFIG_FILE__"
+RUNSCRIPT
+sed -i "s|__INNER_SCRIPT__|${INNER_SCRIPT}|g; s|__CONFIG_FILE__|${CONFIG_FILE}|g" "${RUN_SCRIPT_PATH}"
+chmod +x "${RUN_SCRIPT_PATH}"
+
+_ok "Run script  : ${RUN_SCRIPT_PATH}"
+echo ""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# --run mode: exec server directly, poll /health, print test commands
+# ══════════════════════════════════════════════════════════════════════════════
+if $RUN_MODE; then
+
+    _info "Starting vLLM server (logs → ${LOG_FILE})..."
+    $DOCKER_CMD exec -d "$CONTAINER_NAME" \
+        bash -c "bash '${RUN_SCRIPT_PATH}' > '${LOG_FILE}' 2>&1"
+
+    _ok "Server process launched inside container."
+    echo "  (tail -f ${LOG_FILE})"
+    echo ""
+
+    READY=false
+    for _ in $(seq 1 120); do
+        if curl -sf "http://127.0.0.1:${port}/health" &>/dev/null; then
+            READY=true; break
+        fi
+        printf "."
+        sleep 5
+    done
+    echo ""
+
+    MODEL_API="${served_model_name:-${WEIGHTS_PATH}}"
+
+    if $READY; then
+        _ok "═══════════════════════════════════════════════════"
+        _ok " vLLM server ready — ${CONTAINER_NAME}  :${port}"
+        _ok "═══════════════════════════════════════════════════"
+    else
+        _warn "Server did not respond within 600 s. It may still be loading."
+        _warn "Check: tail -f ${LOG_FILE}"
     fi
-    running=$($DOCKER_CMD inspect "$CONTAINER_NAME" --format '{{.State.Running}}' 2>/dev/null || echo "false")
-    if [[ "$running" != "true" ]]; then
-        _err "Container exited unexpectedly. Last 30 log lines:"
-        $DOCKER_CMD logs "$CONTAINER_NAME" --tail 30 2>&1 || true
-        exit 1
+
+    echo ""
+    if [[ "$task" == "embed" ]]; then
+        echo "── Embedding test ────────────────────────────────────────"
+        echo "curl -s http://127.0.0.1:${port}/v1/embeddings \\"
+        echo "  -H 'Content-Type: application/json' \\"
+        echo "  -d '{\"model\": \"${MODEL_API}\", \"input\": \"Hello, world!\"}' \\"
+        echo "  | python3 -m json.tool"
+    else
+        echo "── Chat completion test ───────────────────────────────────"
+        echo "curl -s http://127.0.0.1:${port}/v1/chat/completions \\"
+        echo "  -H 'Content-Type: application/json' \\"
+        echo "  -d '{\"model\": \"${MODEL_API}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}], \"max_tokens\": 64}' \\"
+        echo "  | python3 -m json.tool"
     fi
-    printf "."
-    sleep 5
-done
-echo ""
 
-MODEL_API="${served_model_name:-${WEIGHTS_PATH}}"
+    echo ""
+    echo "── Container management ──────────────────────────────────"
+    echo "  tail -f ${LOG_FILE}"
+    echo "  ${DOCKER_CMD} exec -it ${CONTAINER_NAME} bash"
+    echo "  ${DOCKER_CMD} stop ${CONTAINER_NAME}"
+    echo "  ${DOCKER_CMD} rm   ${CONTAINER_NAME}"
 
-if $READY; then
-    _ok "═══════════════════════════════════════════════════"
-    _ok " vLLM server ready — ${CONTAINER_NAME}  :${port}"
-    _ok "═══════════════════════════════════════════════════"
+# ══════════════════════════════════════════════════════════════════════════════
+# Default (interactive): enter shell at LOG_DIR, user runs the script manually
+# ══════════════════════════════════════════════════════════════════════════════
 else
-    _warn "Server did not respond within 600 s. It may still be loading."
-    _warn "Check: ${DOCKER_CMD} logs -f ${CONTAINER_NAME}"
-fi
 
-# ── Print test commands ────────────────────────────────────────────────────────
+    # Write a small env-setup snippet to /tmp inside the container.
+    # It sources LD_LIBRARY_PATH from PID 1, changes to LOG_DIR, and prints a banner.
+    _env_tmp=$(mktemp /tmp/vllm_docker_env_XXXXXX.sh)
+    cat > "$_env_tmp" <<ENVSCRIPT
+_ld=\$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^LD_LIBRARY_PATH=//p' | head -1)
+[[ -n "\$_ld" ]] && export LD_LIBRARY_PATH="\$_ld"
+unset _ld
+cd '${LOG_DIR}'
 echo ""
-if [[ "$task" == "embed" ]]; then
-    echo "── Embedding test ────────────────────────────────────────"
-    echo "curl -s http://127.0.0.1:${port}/v1/embeddings \\"
-    echo "  -H 'Content-Type: application/json' \\"
-    echo "  -d '{\"model\": \"${MODEL_API}\", \"input\": \"Hello, world!\"}' \\"
-    echo "  | python3 -m json.tool"
-else
-    echo "── Chat completion test ───────────────────────────────────"
-    echo "curl -s http://127.0.0.1:${port}/v1/chat/completions \\"
-    echo "  -H 'Content-Type: application/json' \\"
-    echo "  -d '{\"model\": \"${MODEL_API}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}], \"max_tokens\": 64}' \\"
-    echo "  | python3 -m json.tool"
-fi
+echo "  Docker shell — vLLM interactive session"
+echo "  Model      : ${model_weights}"
+echo "  Log dir    : ${LOG_DIR}"
+echo "  Start server with:"
+echo "    bash ${RUN_SCRIPT_NAME}"
+echo ""
+ENVSCRIPT
+    $DOCKER_CMD exec -i "$CONTAINER_NAME" tee /tmp/.biren_env.sh < "$_env_tmp" > /dev/null
+    rm -f "$_env_tmp"
 
-echo ""
-echo "── Container management ──────────────────────────────────"
-echo "  ${DOCKER_CMD} logs -f ${CONTAINER_NAME}"
-echo "  ${DOCKER_CMD} stop ${CONTAINER_NAME}"
-echo "  ${DOCKER_CMD} rm   ${CONTAINER_NAME}"
+    echo "  To start the server, run inside the container:"
+    echo "    bash ${RUN_SCRIPT_NAME}"
+    echo ""
+    echo "── Container management ──────────────────────────────────"
+    echo "  ${DOCKER_CMD} stop ${CONTAINER_NAME}"
+    echo "  ${DOCKER_CMD} rm   ${CONTAINER_NAME}"
+    echo ""
+    _info "Entering interactive shell inside container at ${LOG_DIR} ..."
+    _info "(Type 'exit' or Ctrl-D to leave; container keeps running)"
+    echo ""
+
+    $DOCKER_CMD exec -it "$CONTAINER_NAME" \
+        bash -c "source /tmp/.biren_env.sh && exec bash -i"
+
+fi
