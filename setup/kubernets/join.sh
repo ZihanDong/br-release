@@ -100,14 +100,15 @@ preflight_check() {
 
 # ── 解析 join 参数 ────────────────────────────────────────────────────────────
 resolve_join_params() {
-    if [[ -f "${JOIN_FILE}" ]] && grep -q "kubeadm join" "${JOIN_FILE}"; then
-        log_info "从 join 文件读取参数: ${JOIN_FILE}"
-        _parse_join_file
+    # Explicit env vars take priority over any file on disk.
+    if [[ -n "${MASTER_IP}" && -n "${JOIN_TOKEN}" && -n "${CA_CERT_HASH}" ]]; then
+        log_info "从环境变量读取 join 参数。"
         return
     fi
 
-    if [[ -n "${MASTER_IP}" && -n "${JOIN_TOKEN}" && -n "${CA_CERT_HASH}" ]]; then
-        log_info "从环境变量读取 join 参数。"
+    if [[ -f "${JOIN_FILE}" ]] && grep -q "kubeadm join" "${JOIN_FILE}"; then
+        log_info "从 join 文件读取参数: ${JOIN_FILE}"
+        _parse_join_file
         return
     fi
 
@@ -163,6 +164,9 @@ run_kubeadm_join() {
     grep -q "This node has joined the cluster" /tmp/kubeadm-join.log \
         || die "kubeadm join 失败，详见 /tmp/kubeadm-join.log"
 
+    # kubeadm join does not create the static-pod manifests dir (only init does),
+    # but kubelet watches it unconditionally — create it to suppress the log flood.
+    mkdir -p /etc/kubernetes/manifests
     log_info "节点成功加入集群。"
 }
 
