@@ -42,10 +42,17 @@ def should_quantize(weight_name: str) -> bool:
 
 
 def pack_weight_int8(qweight: torch.Tensor, scale: torch.Tensor) -> dict:
+    # pack_to_int32 packs the last dim: [out, in] -> [out, in//4].
+    # The framework's weight_loader applies .t() to the loaded weight when
+    # is_transposed=True, so the on-disk format [out, in//4] is correct —
+    # do NOT pre-transpose here.
+    #
+    # Scales are also loaded with is_transposed=True, so .t() turns [N, 1]
+    # into [1, N], matching the [E, 1, 2*intermediate] buffer in create_weights.
     return {
         "weight_packed": pack_to_int32(qweight.to(torch.int8), 8),
         "weight_shape": torch.tensor(qweight.shape),
-        "weight_scale": scale,
+        "weight_scale": scale.unsqueeze(-1),
     }
 
 
