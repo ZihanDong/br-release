@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ── Paths ──────────────────────────────────────────────────────────────────────
 _REGISTRY_SH="${SCRIPT_DIR}/../model_registry.sh"
 LOG_DIR="${SCRIPT_DIR}/logs"
-CONTAINER_IMAGE='birensupa-smartinfer-vllm:26.04.rc2-py310-pt2.8.0-br1xx'
+CONTAINER_IMAGE='birensupa-smartinfer-vllm:26.05.14-py310-pt2.8.0-br1xx'
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
@@ -190,7 +190,6 @@ $DOCKER_CMD run -d \
     --ulimit nofile=1048576 \
     -v /home:/home \
     -v /data:/data \
-    -v "${SCRIPT_DIR}/patches/vllm_br_parameter.py:/usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/parameter.py:ro" \
     --net host \
     $device_args \
     -e "BIREN_VISIBLE_DEVICES=${biren_visible}" \

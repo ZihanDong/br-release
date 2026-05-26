@@ -21,7 +21,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONTAINER_IMAGE='birensupa-smartinfer-vllm:26.04.beta1-py310-pt2.8.0-br1xx'
+CONTAINER_IMAGE='birensupa-smartinfer-vllm:26.05.14-py310-pt2.8.0-br1xx'
 BENCH_CONTAINER_NAME='vllm_bench_client'
 
 _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
