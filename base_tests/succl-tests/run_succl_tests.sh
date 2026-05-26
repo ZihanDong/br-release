@@ -7,6 +7,7 @@
 #
 # 参数说明:
 #   -v                    可选。详细模式：测试输出同时打印到终端和日志文件
+#   --debug               可选。启用 SUCCL 库调试输出（TRACE 级别），日志写入 <log_dir>/debug/
 #   --config <file>       必填，可重复。运行配置文件（INI 格式，每个 [section] 为一组测试）
 #   --general <file>      可选。通用配置文件（默认: <script_dir>/configs/general.conf）
 #   --multi-config <file> 可选。多节点配置文件（默认: <script_dir>/configs/multi-node.conf）
@@ -41,6 +42,8 @@ SUCCL_BIN_DIR="/opt/succl-tests/bin"
 # §3.3.1: nthreads(-t) 和 ngpus(-G) 仅支持1，写死在此处不透传到配置文件
 readonly FIXED_NTHREADS=1
 readonly FIXED_NGPUS=1
+
+DEBUG_MODE=0
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -95,6 +98,7 @@ RUN_CONFIGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -v)               VERBOSE=1; shift ;;
+        --debug)          DEBUG_MODE=1; shift ;;
         --config)         [[ $# -lt 2 ]] && { echo "ERROR: --config requires a file argument"; exit 1; }
                           RUN_CONFIGS+=("$2"); shift 2 ;;
         --general)        [[ $# -lt 2 ]] && { echo "ERROR: --general requires a file argument"; exit 1; }
@@ -193,6 +197,8 @@ ini_get() {
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_DIR="${LOG_PATH}/succl-tests_${TIMESTAMP}"
 mkdir -p "$LOG_DIR"
+LOG_DIR=$(realpath "$LOG_DIR")
+[[ "$DEBUG_MODE" -eq 1 ]] && mkdir -p "${LOG_DIR}/debug"
 
 log_run() {
     local log_file="$1"; shift
@@ -405,6 +411,15 @@ process_section() {
     # ── Build MPI environment args ────────────────────────────────────────────
     local -a mpi_env_args=(-x "BR_UMD_DEBUG_P2P_ACCESS_CHECK=${BR_P2P_CHECK}")
     [[ -n "$SUCCL_BUFFSIZE" ]] && mpi_env_args+=(-x "SUCCL_BUFFSIZE=${SUCCL_BUFFSIZE}")
+    if [[ "$DEBUG_MODE" -eq 1 ]]; then
+        # libsuccl always prepends the container CWD (/workspace/) to the path, so pass
+        # a relative path (no leading '/').  The library writes to:
+        #   /workspace/<LOG_DIR_without_leading_slash>/debug/succl_debug<rank>_0.log
+        # We pre-create that directory in all containers and collect files after the run.
+        mpi_env_args+=(-x "SUCCL_DEBUG=WARN")
+        mpi_env_args+=(-x "SUCCL_DEBUG_FILE=${LOG_DIR#/}/debug/succl_debug%d.log")
+        mpi_env_args+=(-x "SUCCL_DEBUG_SUBSYS=ALL")
+    fi
 
     # ── Multi-node: validate config and build host string ─────────────────────
     local mpi_iface_arg="" mpi_hosts_str=""
@@ -454,6 +469,20 @@ process_section() {
         done
     fi
 
+    # ── Debug mode: pre-create log dirs inside all containers ────────────────
+    if [[ "$DEBUG_MODE" -eq 1 ]]; then
+        local _dbg_ctr_dir="/workspace/${LOG_DIR#/}/debug"
+        docker exec "$CONTAINER_NAME" mkdir -p "$_dbg_ctr_dir" 2>/dev/null || true
+        if [[ "$s_mode" == "multi" ]]; then
+            local _dip
+            for _dip in "${MULTI_NODE_IPS[@]}"; do
+                docker exec "$CONTAINER_NAME" bash -c \
+                    "ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
+                     -p ${SSH_PORT} root@${_dip} 'mkdir -p ${_dbg_ctr_dir}'" 2>/dev/null || true
+            done
+        fi
+    fi
+
     # ── Section header ────────────────────────────────────────────────────────
     echo ""
     echo "──── [${section}]  mode=${s_mode}  ops=${s_ops}  gpus=${s_gpus} ────"
@@ -468,16 +497,23 @@ process_section() {
         CURR_MODE="$s_mode"
         CURR_GPUS="$s_gpus"
 
+        # Wrap the binary with 'bash -c ulimit && exec' so every rank process
+        # (including those spawned on remote nodes via mpiexec/SSH orted) raises its
+        # soft nofile limit to 655360 before exec'ing the binary.  This is safe
+        # because Docker sets hard nofile=655360, so any process can raise its own
+        # soft limit up to that value without any file modification.
+        local _rank_cmd="bash -c 'ulimit -n 655360 && exec ${bin_path} ${succl_args[*]}'"
+
         if [[ "$s_mode" == "single" ]]; then
             CURR_INNER_CMD="mpiexec --allow-run-as-root \
 -n ${s_gpus} \
 ${mpi_env_args[*]} \
-${bin_path} ${succl_args[*]}"
+${_rank_cmd}"
         else
             # oob_tcp_if_include ensures orted back-channel also uses the same iface
             local oob_arg=""
             [[ -n "$MPI_IFACE_INCLUDE" ]] && oob_arg="--mca oob_tcp_if_include ${MPI_IFACE_INCLUDE}"
-            CURR_INNER_CMD="mpiexec --allow-run-as-root \
+            CURR_INNER_CMD="ulimit -n 655360 && mpiexec --allow-run-as-root \
 --mca pml ^ucx \
 ${oob_arg} \
 ${mpi_iface_arg} \
@@ -485,10 +521,26 @@ ${mpi_iface_arg} \
 --host ${mpi_hosts_str} \
 ${mpi_env_args[*]} \
 -x LD_LIBRARY_PATH \
-${bin_path} ${succl_args[*]}"
+${_rank_cmd}"
         fi
 
         run_section_op "$section" "$op" || failed_ops+=("$op")
+
+        # ── Debug mode: collect log files from containers to host ─────────────
+        if [[ "$DEBUG_MODE" -eq 1 ]]; then
+            local _dbg_ctr_dir="/workspace/${LOG_DIR#/}/debug"
+            docker cp "${CONTAINER_NAME}:${_dbg_ctr_dir}/." "${LOG_DIR}/debug/" 2>/dev/null || true
+            if [[ "$s_mode" == "multi" ]]; then
+                local _cip
+                for _cip in "${MULTI_NODE_IPS[@]}"; do
+                    docker exec "$CONTAINER_NAME" bash -c \
+                        "ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
+                         -p ${SSH_PORT} root@${_cip} \
+                         'tar -C ${_dbg_ctr_dir} -cf - . 2>/dev/null || true'" 2>/dev/null \
+                        | tar -C "${LOG_DIR}/debug/" -xf - 2>/dev/null || true
+                done
+            fi
+        fi
 
         local op_status
         op_status=$([[ " ${failed_ops[*]:-} " == *" ${op} "* ]] && echo "FAILED" || echo "OK")
