@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Generate a Kubernetes YAML for a vLLM server deployment.
-# Saves the result to k8s_yaml_gen/<model_weights>.yaml (does not apply it).
+# Generate a Kubernetes YAML for a vLLM server.
+# Saves the result to k8s_yaml_gen/<model>-<type>.yaml (does not apply it).
 #
 # Usage:
-#   bash k8s_yaml_gen.sh <config_file>
+#   bash k8s_yaml_gen.sh --task <pod|deploy> <config_file>
+#
+#   --task deploy  Deployment + NodePort Service  (server auto-starts at launch)
+#   --task pod     Interactive Pod only           (server script written; user starts manually)
 #
 # config_file may be:
 #   - a bare model name: bge-m3  (resolved to configs/bge-m3.conf)
 #   - a relative path:   configs/bge-m3.conf
 #   - an absolute path:  /path/to/any.conf
 #
-# After generating, review the YAML and deploy with:
-#   bash test_k8s.sh k8s_yaml_gen/<model>.yaml
+# After generating, review the YAML and apply with:
+#   bash k8s_apply.sh k8s_yaml_gen/<model>-<type>.yaml
 
 set -euo pipefail
 
@@ -31,7 +34,10 @@ _err()  { echo -e "\033[0;31m[ERR ]\033[0m  $*" >&2; }
 
 usage() {
     echo ""
-    echo "Usage: $0 <config_file>"
+    echo "Usage: $0 --task <pod|deploy> <config_file>"
+    echo ""
+    echo "  --task deploy  Generate a Deployment + NodePort Service YAML (server auto-starts)"
+    echo "  --task pod     Generate an interactive Pod YAML (server script prepared; user starts manually)"
     echo ""
     echo "Available configs:"
     for f in "${SCRIPT_DIR}/configs/"*.conf; do
@@ -41,10 +47,28 @@ usage() {
     exit 1
 }
 
-# ── Resolve config ─────────────────────────────────────────────────────────────
-[[ $# -lt 1 ]] && { _err "A config file is required."; usage; }
+# ── Parse arguments ────────────────────────────────────────────────────────────
+K8S_TYPE=""
+CONFIG_ARG=""
 
-CONFIG_ARG="$1"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --task)
+            [[ $# -lt 2 ]] && { _err "--task requires an argument (pod|deploy)"; usage; }
+            K8S_TYPE="$2"; shift 2 ;;
+        -*)
+            _err "Unknown option: $1"; usage ;;
+        *)
+            CONFIG_ARG="$1"; shift ;;
+    esac
+done
+
+[[ -z "$K8S_TYPE" ]] && { _err "--task is required."; usage; }
+[[ "$K8S_TYPE" != "pod" && "$K8S_TYPE" != "deploy" ]] && {
+    _err "--task must be 'pod' or 'deploy', got: '${K8S_TYPE}'"; usage; }
+[[ -z "$CONFIG_ARG" ]] && { _err "A config file is required."; usage; }
+
+# ── Resolve config ─────────────────────────────────────────────────────────────
 CONFIG_FILE=""
 
 if [[ "$CONFIG_ARG" == /* ]]; then
@@ -82,10 +106,11 @@ k8s_node_name=""
 source "$CONFIG_FILE"
 
 [[ -z "$model_weights" ]] && { _err "model_weights not set in $(basename "$CONFIG_FILE")"; exit 1; }
-[[ -z "$k8s_nodeport"  ]] && { _err "k8s_nodeport not set in $(basename "$CONFIG_FILE")"; exit 1; }
+[[ "$K8S_TYPE" == "deploy" && -z "$k8s_nodeport" ]] && {
+    _err "k8s_nodeport not set in $(basename "$CONFIG_FILE") (required for deploy type)"; exit 1; }
 
-_info "Config      : $(basename "$CONFIG_FILE")"
-_info "Model key   : $model_weights  |  port=$port  |  nodeport=$k8s_nodeport  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
+_info "Config      : $(basename "$CONFIG_FILE")  [task=${K8S_TYPE}]"
+_info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
 
 # ── Registry lookup (via model_registry.sh) ───────────────────────────────────
 [[ ! -f "$_REGISTRY_SH" ]] && { _err "model_registry.sh not found: $_REGISTRY_SH"; exit 1; }
@@ -150,6 +175,7 @@ k8s_name="${model_weights//./-}"
 APP_LABEL="vllm-${k8s_name}"
 DEPLOY_NAME="vllm-${k8s_name}"
 SVC_NAME="vllm-${k8s_name}"
+POD_NAME="vllm-${k8s_name}"
 
 INNER_SCRIPT="${SCRIPT_DIR}/vllm_server.sh"
 LLM_DIR="$(dirname "${SCRIPT_DIR}")"
@@ -163,10 +189,65 @@ done
 
 # ── Write YAML ─────────────────────────────────────────────────────────────────
 mkdir -p "$YAML_DIR"
-OUT_YAML="${YAML_DIR}/${model_weights}.yaml"
+OUT_YAML="${YAML_DIR}/${model_weights}-${K8S_TYPE}.yaml"
+
+# Shared volume/volumeMount snippet used by both types
+_vol_mounts="        volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: model-weights
+          mountPath: /data/models
+          readOnly: true
+        - name: vllm-scripts
+          mountPath: ${SCRIPT_DIR}
+          readOnly: true
+        - name: patch-parameter
+          mountPath: /usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/parameter.py
+          readOnly: true
+        - name: model-registry
+          mountPath: ${LLM_DIR}/model_registry.sh
+          readOnly: true
+        - name: model-registry-conf
+          mountPath: ${LLM_DIR}/model_registry.conf
+          readOnly: true
+        - name: biren-driver
+          mountPath: /usr/local/birensupa/driver
+          readOnly: true"
+
+_volumes="      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Gi
+      - name: model-weights
+        hostPath:
+          path: /data/models
+          type: Directory
+      - name: vllm-scripts
+        hostPath:
+          path: ${SCRIPT_DIR}
+          type: Directory
+      - name: patch-parameter
+        hostPath:
+          path: ${SCRIPT_DIR}/patches/vllm_br_parameter.py
+          type: File
+      - name: model-registry
+        hostPath:
+          path: ${LLM_DIR}/model_registry.sh
+          type: File
+      - name: model-registry-conf
+        hostPath:
+          path: ${LLM_DIR}/model_registry.conf
+          type: File
+      - name: biren-driver
+        hostPath:
+          path: /usr/local/birensupa/driver
+          type: Directory"
+
+if [[ "$K8S_TYPE" == "deploy" ]]; then
 
 cat > "$OUT_YAML" <<YAML
-# Generated by k8s_yaml_gen.sh  model=${model_weights}  config=$(basename "$CONFIG_FILE")
+# Generated by k8s_yaml_gen.sh  model=${model_weights}  config=$(basename "$CONFIG_FILE")  task=deploy
 ---
 apiVersion: v1
 kind: Namespace
@@ -179,6 +260,9 @@ kind: Deployment
 metadata:
   name: ${DEPLOY_NAME}
   namespace: ${K8S_NAMESPACE}
+  annotations:
+    vllm.io/config-file: "${CONFIG_FILE}"
+    vllm.io/server-script: "${INNER_SCRIPT}"
   labels:
     app: ${APP_LABEL}
     model: ${model_weights}
@@ -250,56 +334,8 @@ spec:
           periodSeconds: 30
           failureThreshold: 3
           timeoutSeconds: 10
-        volumeMounts:
-        - name: dshm
-          mountPath: /dev/shm
-        - name: model-weights
-          mountPath: /data/models
-          readOnly: true
-        - name: vllm-scripts
-          mountPath: ${SCRIPT_DIR}
-          readOnly: true
-        - name: patch-parameter
-          mountPath: /usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/parameter.py
-          readOnly: true
-        - name: model-registry
-          mountPath: ${LLM_DIR}/model_registry.sh
-          readOnly: true
-        - name: model-registry-conf
-          mountPath: ${LLM_DIR}/model_registry.conf
-          readOnly: true
-        - name: biren-driver
-          mountPath: /usr/local/birensupa/driver
-          readOnly: true
-      volumes:
-      - name: dshm
-        emptyDir:
-          medium: Memory
-          sizeLimit: 256Gi
-      - name: model-weights
-        hostPath:
-          path: /data/models
-          type: Directory
-      - name: vllm-scripts
-        hostPath:
-          path: ${SCRIPT_DIR}
-          type: Directory
-      - name: patch-parameter
-        hostPath:
-          path: ${SCRIPT_DIR}/patches/vllm_br_parameter.py
-          type: File
-      - name: model-registry
-        hostPath:
-          path: ${LLM_DIR}/model_registry.sh
-          type: File
-      - name: model-registry-conf
-        hostPath:
-          path: ${LLM_DIR}/model_registry.conf
-          type: File
-      - name: biren-driver
-        hostPath:
-          path: /usr/local/birensupa/driver
-          type: Directory
+${_vol_mounts}
+${_volumes}
 
 ---
 apiVersion: v1
@@ -322,7 +358,126 @@ spec:
     protocol: TCP
 YAML
 
+else  # pod
+
+# Pod-level volume/volumeMount indentation is 4 spaces less than in Deployment template
+_pod_vol_mounts="    volumeMounts:
+    - name: dshm
+      mountPath: /dev/shm
+    - name: model-weights
+      mountPath: /data/models
+      readOnly: true
+    - name: vllm-scripts
+      mountPath: ${SCRIPT_DIR}
+      readOnly: true
+    - name: patch-parameter
+      mountPath: /usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/parameter.py
+      readOnly: true
+    - name: model-registry
+      mountPath: ${LLM_DIR}/model_registry.sh
+      readOnly: true
+    - name: model-registry-conf
+      mountPath: ${LLM_DIR}/model_registry.conf
+      readOnly: true
+    - name: biren-driver
+      mountPath: /usr/local/birensupa/driver
+      readOnly: true"
+
+_pod_volumes="  volumes:
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 256Gi
+  - name: model-weights
+    hostPath:
+      path: /data/models
+      type: Directory
+  - name: vllm-scripts
+    hostPath:
+      path: ${SCRIPT_DIR}
+      type: Directory
+  - name: patch-parameter
+    hostPath:
+      path: ${SCRIPT_DIR}/patches/vllm_br_parameter.py
+      type: File
+  - name: model-registry
+    hostPath:
+      path: ${LLM_DIR}/model_registry.sh
+      type: File
+  - name: model-registry-conf
+    hostPath:
+      path: ${LLM_DIR}/model_registry.conf
+      type: File
+  - name: biren-driver
+    hostPath:
+      path: /usr/local/birensupa/driver
+      type: Directory"
+
+cat > "$OUT_YAML" <<YAML
+# Generated by k8s_yaml_gen.sh  model=${model_weights}  config=$(basename "$CONFIG_FILE")  task=pod
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${K8S_NAMESPACE}
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${POD_NAME}
+  namespace: ${K8S_NAMESPACE}
+  annotations:
+    vllm.io/config-file: "${CONFIG_FILE}"
+    vllm.io/server-script: "${INNER_SCRIPT}"
+  labels:
+    app: ${APP_LABEL}
+    model: ${model_weights}
+spec:
+  # RuntimeClass 'biren' uses handler: runc.
+  # GPU devices: privileged + BIREN_VISIBLE_DEVICES.  SDK libs: biren-driver hostPath volume.
+  runtimeClassName: biren
+  nodeName: ${NODE_NAME}
+  restartPolicy: Never
+  containers:
+  - name: vllm-server
+    image: ${CONTAINER_IMAGE}
+    imagePullPolicy: IfNotPresent
+    # No 'command' — preserves ENTRYPOINT (biren_entrypoint.sh) for LD_LIBRARY_PATH setup.
+    # Pod stays alive; user enters via 'kubectl exec -it' and runs the server script manually.
+    args:
+    - sleep
+    - infinity
+    env:
+    - name: VLLM_USE_V1
+      value: "1"
+    - name: VLLM_WORKER_MULTIPROC_METHOD
+      value: spawn
+    - name: VLLM_BR_WEIGHT_TYPE
+      value: NUMA
+    - name: BIREN_VISIBLE_DEVICES
+      value: "${_biren_visible}"
+    resources:
+      requests:
+        birentech.com/gpu: "${gpu_needed}"
+        cpu: "${cpu_req}"
+        memory: "${mem_req_gi}Gi"
+      limits:
+        birentech.com/gpu: "${gpu_needed}"
+        cpu: "${cpu_lim}"
+        memory: "${mem_lim_gi}Gi"
+    securityContext:
+      privileged: true
+      capabilities:
+        add:
+        - IPC_LOCK
+${_pod_vol_mounts}
+${_pod_volumes}
+YAML
+
+fi
+
 _ok "YAML saved  : $OUT_YAML"
 echo ""
-echo "  Review the YAML, then deploy and test with:"
-echo "    bash ${SCRIPT_DIR}/test_k8s.sh ${OUT_YAML}"
+echo "  Review the YAML, then apply with:"
+echo "    bash ${SCRIPT_DIR}/k8s_apply.sh ${OUT_YAML}"
