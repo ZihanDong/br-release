@@ -291,9 +291,6 @@ _vol_mounts="        volumeMounts:
         - name: vllm-scripts
           mountPath: ${SCRIPT_DIR}
           readOnly: true
-        - name: patch-parameter
-          mountPath: /usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/parameter.py
-          readOnly: true
         - name: model-registry
           mountPath: ${LLM_DIR}/model_registry.sh
           readOnly: true
@@ -317,10 +314,6 @@ _volumes="      volumes:
         hostPath:
           path: ${SCRIPT_DIR}
           type: Directory
-      - name: patch-parameter
-        hostPath:
-          path: ${SCRIPT_DIR}/patches/vllm_br_parameter.py
-          type: File
       - name: model-registry
         hostPath:
           path: ${LLM_DIR}/model_registry.sh
@@ -460,9 +453,6 @@ _pod_vol_mounts="    volumeMounts:
     - name: vllm-scripts
       mountPath: ${SCRIPT_DIR}
       readOnly: true
-    - name: patch-parameter
-      mountPath: /usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/parameter.py
-      readOnly: true
     - name: model-registry
       mountPath: ${LLM_DIR}/model_registry.sh
       readOnly: true
@@ -486,10 +476,6 @@ _pod_volumes="  volumes:
     hostPath:
       path: ${SCRIPT_DIR}
       type: Directory
-  - name: patch-parameter
-    hostPath:
-      path: ${SCRIPT_DIR}/patches/vllm_br_parameter.py
-      type: File
   - name: model-registry
     hostPath:
       path: ${LLM_DIR}/model_registry.sh
