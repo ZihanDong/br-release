@@ -1,0 +1,55 @@
+# GPU 测试 Pod 模板
+#
+# 用途：验证 BirenTech GPU 资源分配和 brsmi 可用性。
+#
+# 前提：
+#   1. biren-device-plugin DaemonSet 已在 biren-gpu 命名空间运行
+#      (kubectl get pods -n biren-gpu)
+#   2. 目标节点已打 birentech.com=gpu 标签
+#      (kubectl get node <node> --show-labels | grep birentech)
+#   3. GPU 资源已注册
+#      (kubectl get node <node> -o jsonpath='{.status.allocatable.birentech\.com/gpu}')
+#
+# 使用方式：
+#   kubectl apply -f gpu-test-pod.yaml
+#   kubectl get pod gpu-test                  # 等待 Running
+#   kubectl exec -it gpu-test -- brsmi        # 查看 GPU 信息
+#   kubectl delete -f gpu-test-pod.yaml       # 清理
+#
+# brsmi 说明：
+#   device plugin 以 --mount-host-path 模式部署时，会将宿主机的 brsmi 二进制
+#   和 brml 动态库分别挂载到 Pod 内的 /opt/birentech/bin 和 /opt/birentech/lib。
+#   本模板预设了对应的环境变量，exec 进入 Pod 后可直接运行 brsmi。
+#
+# 镜像说明：
+#   默认使用推理镜像（需提前推送到私有 Registry）。
+#   也可替换为任意 Linux 基础镜像（如 ubuntu:22.04），brsmi 由 device plugin 注入。
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-test
+  namespace: default
+spec:
+  restartPolicy: OnFailure
+  # 指定调度到 GPU 节点（与 device plugin nodeSelector 一致）
+  nodeSelector:
+    birentech.com: gpu
+  containers:
+    - name: gpu-test
+      # 推理镜像自带完整 SUPA 环境（brsmi 内置，无需 device plugin 挂载）。
+      # 如使用无 SUPA 的基础镜像（如 ubuntu:22.04），需确认 device plugin 以
+      # --mount-host-path 模式部署，brsmi 和 brml 才会被注入到 /opt/birentech/。
+      image: 172.25.198.36:32000/infer/birensupa-smartinfer-vllm:26.04.rc2-py310-pt2.8.0-br1xx
+      command: ["sleep"]
+      args: ["infinity"]
+      env:
+        # brsmi 二进制由 device plugin 挂载到 /opt/birentech/bin
+        - name: PATH
+          value: /opt/birentech/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        # brml 动态库由 device plugin 挂载到 /opt/birentech/lib
+        - name: LD_LIBRARY_PATH
+          value: /opt/birentech/lib
+      resources:
+        limits:
+          birentech.com/gpu: 1   # 申请 1 块 GPU；按需调整数量

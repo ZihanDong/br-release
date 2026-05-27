@@ -188,14 +188,28 @@ deploy_plugin() {
     # 填入镜像名
     sed -i "s|image: *$|image: ${PLUGIN_IMAGE}|" "${manifest}"
 
-    # 修正 brml volume hostPath：原 YAML 使用 /usr/lib，但库文件实际路径可能通过
-    # 绝对符号链接指向其他目录（如 /usr/local/birensupa/...），导致容器内符号链接断裂。
-    # 检测真实库目录并替换，确保容器内可直接访问 .so 文件。
+    # Fix brml/brsmi hostPath: the yaml defaults to /usr/lib and /usr/bin, but those
+    # are symlinks on this host pointing into /usr/local/birensupa/... via absolute paths.
+    # Mounting the symlink-containing dir into the container leaves broken absolute symlinks;
+    # mounting the resolved real dir gives the container actual .so files and binaries.
     local real_lib_dir
     real_lib_dir=$(dirname "$(realpath /usr/lib/libbiren-ml.so.1 2>/dev/null)" 2>/dev/null || true)
     if [[ -n "${real_lib_dir}" && "${real_lib_dir}" != "/usr/lib" ]]; then
-        log_info "检测到库文件真实路径: ${real_lib_dir}，修正 brml volume hostPath..."
+        log_info "修正 brml volume hostPath: /usr/lib → ${real_lib_dir}"
         sed -i "s|path: /usr/lib$|path: ${real_lib_dir}|" "${manifest}"
+    fi
+
+    local real_brsmi_dir
+    real_brsmi_dir=$(dirname "$(realpath "$(command -v brsmi 2>/dev/null)" 2>/dev/null)" 2>/dev/null || true)
+    if [[ -n "${real_brsmi_dir}" && "${real_brsmi_dir}" != "/usr/bin" ]]; then
+        log_info "修正 brsmi volume hostPath: /usr/bin → ${real_brsmi_dir}"
+        sed -i "s|path: /usr/bin$|path: ${real_brsmi_dir}|" "${manifest}"
+    fi
+
+    # Enable propagation of brml/brsmi mounts into GPU-allocated pods (doc §7.2).
+    if ! grep -q 'mount-host-path' "${manifest}"; then
+        sed -i 's|"--container-runtime", "runc"\]|"--container-runtime", "runc", "--mount-host-path"]|' "${manifest}"
+        log_info "已启用 --mount-host-path（GPU pod 内可用 brsmi）。"
     fi
 
     kubectl apply -f "${manifest}" ${KC}
@@ -262,25 +276,9 @@ mode_cpu() {
     done
 }
 
-_ensure_biren_runtime_class() {
-    if ! kubectl get runtimeclass biren &>/dev/null 2>&1; then
-        kubectl apply -f - <<EOF
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: biren
-handler: runc
-EOF
-        log_info "RuntimeClass 'biren' 已创建。"
-    else
-        log_info "RuntimeClass 'biren' 已存在，跳过。"
-    fi
-}
-
 mode_biren() {
     log_info "── 模式: biren（BirenTech GPU 算力节点）──"
 
-    _ensure_biren_runtime_class
     load_plugin_image
     deploy_plugin
 
