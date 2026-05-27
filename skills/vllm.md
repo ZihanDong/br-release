@@ -8,7 +8,7 @@ metadata:
     - infer/llm/vllm/vllm_server.sh
     - infer/llm/vllm/run_docker.sh
     - infer/llm/vllm/k8s_yaml_gen.sh
-    - infer/llm/vllm/test_k8s.sh
+    - infer/llm/vllm/k8s_apply.sh
     - infer/llm/model_registry.conf
     - infer/llm/vllm/configs/bge-m3.conf
     - infer/llm/vllm/configs/qwen3-32b.conf
@@ -23,16 +23,17 @@ metadata:
 | 文件 | 运行位置 | 说明 |
 |------|---------|------|
 | `vllm_server.sh` | **容器内** | 加载 conf → 查 registry → exec vLLM；被 Docker/k8s 统一调用 |
-| `run_docker.sh` | 宿主机 | GPU 选择（brsmi）+ `docker run` + 健康轮询 |
-| `k8s_yaml_gen.sh` | 宿主机 | 生成 k8s YAML 到 `k8s_yaml_gen/<model>.yaml`，不执行 apply |
-| `test_k8s.sh` | 宿主机 | `kubectl apply <yaml>` + 等待 Ready + API 测试 + 打印命令 |
+| `run_docker.sh` | 宿主机 | GPU 选择（brsmi）+ 启动容器；默认交互式 shell，`--run` 直接拉起 server |
+| `k8s_yaml_gen.sh` | 宿主机 | 生成 k8s YAML 到 `k8s_yaml_gen/<model>-<type>.yaml`，`--task pod\|deploy`，不执行 apply |
+| `k8s_apply.sh` | 宿主机 | `kubectl apply <yaml>`；deploy 自动等待 Ready + API 测试；pod 进入交互式 shell |
 | `../model_registry.conf` | — | 模型库：本地权重路径 + HF/MS 下载 ID（位于 `infer/llm/`，多框架共享） |
 | `configs/<model>.conf` | — | 每个模型的运行参数；Docker 和 k8s 共用同一套配置 |
 
 **架构原则：**
 - 所有 vLLM 参数逻辑集中在 `vllm_server.sh`（容器内脚本）
 - 外层脚本只负责容器编排，不重复构建 vLLM 命令
-- k8s 分两步：先生成 YAML（可检查/修改），再部署测试
+- 容器统一以 `sleep infinity` 启动，server 由 run script 或用户手动触发
+- k8s 分两步：先生成 YAML（可检查/修改），再部署；pod/deploy 通过 `--task` 区分
 - 新增模型只需一个 conf 文件，无需修改任何脚本
 
 已部署模型端口一览：
@@ -51,31 +52,36 @@ metadata:
 
 ```bash
 cd infer/llm/vllm
-sudo bash run_docker.sh <config>
+sudo bash run_docker.sh [--run] <config>
 ```
 
 `<config>` 接受：裸模型名（`bge-m3`）、相对路径、绝对路径。
 
-### 1.2 典型流程
+### 1.2 两种模式
 
-```bash
-sudo bash run_docker.sh bge-m3
-```
+| 模式 | 命令 | 行为 |
+|------|------|------|
+| **交互式**（默认） | `sudo bash run_docker.sh bge-m3` | 容器 idle，进入 bash shell，手动运行 `bash run_vllm_bge-m3_server.sh` |
+| **直接启动** | `sudo bash run_docker.sh --run bge-m3` | 自动 exec server，宿主机轮询 `/health`，打印测试命令后退出 |
 
-输出示例：
+两种模式均会将 `run_vllm_<model>_server.sh` 写入 `logs/` 目录（通过 `/home` bind-mount 对容器可见）。
+
+输出示例（`--run` 模式）：
 ```
-[INFO]  Config      : bge-m3.conf
+[INFO]  Config      : bge-m3.conf  [mode=--run]
 [INFO]  Model key   : bge-m3  |  port=28800  |  tp=1  pp=1
 [ OK ]  Weights     : /data/models/BAAI/bge-m3
 [INFO]  GPU needed  : tp=1 × pp=1 = 1
 [ OK ]  GPUs        : [0]  (card_0 )
 [INFO]  Container   : vllm_bge-m3
-[ OK ]  Container started. Waiting for server on port 28800...
+[ OK ]  Container started.
+[ OK ]  Run script  : .../logs/run_vllm_bge-m3_server.sh
+[INFO]  Starting vLLM server (logs → ...)
         ....
 [ OK ]  vLLM server ready — vllm_bge-m3  :28800
 ```
 
-> 两个模型默认都使用 28800 端口，不能同时用 Docker 运行。若需同时运行，修改其中一个 conf 的 `port`。
+> bge-m3 和 qwen3-32b 默认都使用 28800 端口，不能同时用 Docker 运行。若需同时运行，修改其中一个 conf 的 `port`。
 
 ### 1.3 查看日志
 
@@ -148,22 +154,35 @@ EOF
 
 ### 2.3 典型工作流
 
+**Deployment 方式（生产）：**
+
 ```bash
 cd infer/llm/vllm
 
 # Step 1: 生成 YAML（可检查/修改后再部署）
-bash k8s_yaml_gen.sh bge-m3
-# → 输出: k8s_yaml_gen/bge-m3.yaml
+bash k8s_yaml_gen.sh --task deploy bge-m3
+# → 输出: k8s_yaml_gen/bge-m3-deploy.yaml
 
 # Step 2: 部署并自动测试
-bash test_k8s.sh k8s_yaml_gen/bge-m3.yaml
+bash k8s_apply.sh k8s_yaml_gen/bge-m3-deploy.yaml
 ```
 
-两个模型同时运行：
+**Pod 方式（调试 / 手动控制）：**
 
 ```bash
-bash k8s_yaml_gen.sh bge-m3    && bash test_k8s.sh k8s_yaml_gen/bge-m3.yaml
-bash k8s_yaml_gen.sh qwen3-32b && bash test_k8s.sh k8s_yaml_gen/qwen3-32b.yaml
+bash k8s_yaml_gen.sh --task pod bge-m3
+# → 输出: k8s_yaml_gen/bge-m3-pod.yaml
+
+bash k8s_apply.sh k8s_yaml_gen/bge-m3-pod.yaml [/my/log/dir]
+# → Pod Running 后进入交互式 shell，手动运行：
+# bash run_vllm_bge-m3_server.sh
+```
+
+多模型同时运行：
+
+```bash
+bash k8s_yaml_gen.sh --task deploy bge-m3    && bash k8s_apply.sh k8s_yaml_gen/bge-m3-deploy.yaml
+bash k8s_yaml_gen.sh --task deploy qwen3-32b && bash k8s_apply.sh k8s_yaml_gen/qwen3-32b-deploy.yaml
 ```
 
 ### 2.4 监控进度
@@ -198,9 +217,13 @@ curl -s --noproxy "*" http://172.25.198.37:30801/v1/chat/completions \
 ### 2.6 清理
 
 ```bash
+# Deployment 方式
 kubectl delete deployment/vllm-bge-m3 service/vllm-bge-m3 -n vllm
 kubectl delete deployment/vllm-qwen3-32b service/vllm-qwen3-32b -n vllm
-kubectl delete namespace vllm   # 全部清理
+# Pod 方式
+kubectl delete pod/vllm-bge-m3 -n vllm
+# 全部清理
+kubectl delete namespace vllm
 ```
 
 ---
@@ -262,7 +285,7 @@ modelscope_id=<org/repo>
 | `Failed to infer device type` | RuntimeClass 未创建或 `BIREN_VISIBLE_DEVICES` 未设置 | 执行 2.2 创建 RuntimeClass；确认 YAML 中有 `BIREN_VISIBLE_DEVICES` env var |
 | Pod 长时间 `0/1 Running` | readiness probe 初始延迟 | 正常，bge-m3 约 2 min，qwen3-32b 约 5 min |
 | NodePort curl 返回 502 | 系统 HTTP 代理干扰 | 加 `--noproxy "*"` |
-| `Failed to parse XXX from YAML` | YAML 不是 k8s_yaml_gen.sh 生成的格式 | 确认 YAML 来自 `k8s_yaml_gen.sh` |
+| `Failed to parse XXX from YAML` | YAML 不是 k8s_yaml_gen.sh 生成的格式 | 确认 YAML 来自 `k8s_yaml_gen.sh --task pod\|deploy` |
 | `vllm_server.sh: not found` | hostPath 挂载路径不一致 | 确认 SCRIPT_DIR 路径在目标 nodeName 上存在 |
 
 ---

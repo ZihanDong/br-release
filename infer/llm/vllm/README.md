@@ -5,34 +5,37 @@
 | 方式 | 脚本 | 适用场景 |
 |------|------|---------|
 | **Docker** | `run_docker.sh` | 快速调试、单次运行 |
-| **Kubernetes** | `k8s_yaml_gen.sh` + `test_k8s.sh` | 生产部署、持久运行 |
+| **Kubernetes** | `k8s_yaml_gen.sh` + `k8s_apply.sh` | 生产部署、持久运行 |
 
 ---
 
 ## 架构说明
 
 ```
-宿主机                                  容器内
-┌──────────────────────────┐          ┌──────────────────────────────────┐
-│ run_docker.sh             │          │ biren_entrypoint.sh              │
-│  └ GPU 选择（brsmi）      │ docker   │  └ exec args...                  │
-│  └ 启动容器               │ ──────►  │      bash vllm_server.sh <conf>  │
-│  └ 轮询 /health           │          │        └ exec python3 -m vllm... │
-└──────────────────────────┘          └──────────────────────────────────┘
+宿主机                                          容器内
+┌──────────────────────────────────────┐       ┌─────────────────────────────────────┐
+│ run_docker.sh [--run|default]         │       │ biren_entrypoint.sh (PID 1)         │
+│  └ GPU 选择（brsmi）                 │ ────► │  └ exec sleep infinity              │
+│  └ 启动容器（sleep infinity）        │       │                                     │
+│  └ 写入 run_vllm_*_server.sh         │       │ [--run]  exec run_vllm_*_server.sh  │
+│  [--run]  exec server + 轮询 /health │       │   └ bash vllm_server.sh <conf>      │
+│  [default] 进入交互式 shell           │       │       └ exec python3 -m vllm...     │
+└──────────────────────────────────────┘       └─────────────────────────────────────┘
 
-┌──────────────────────────┐  生成     k8s_yaml_gen/
-│ k8s_yaml_gen.sh           │ ──────►  └ <model>.yaml
-│  └ 节点探测               │
-│  └ 生成 YAML 到文件       │  apply
-└──────────────────────────┘    │
-                                ▼
-┌──────────────────────────┐          ┌──────────────────────────────────┐
-│ test_k8s.sh               │ kubectl  │ biren_entrypoint.sh              │
-│  └ kubectl apply <yaml>   │ ──────►  │  └ exec args...                  │
-│  └ 等待 Pod Ready         │          │      bash vllm_server.sh <conf>  │
-│  └ API 自动测试           │          │        └ exec python3 -m vllm... │
-│  └ 打印 k8s 命令          │          └──────────────────────────────────┘
-└──────────────────────────┘
+┌──────────────────────────────────┐  生成    k8s_yaml_gen/
+│ k8s_yaml_gen.sh --task <type>    │ ──────► ├ <model>-pod.yaml
+│  └ 节点探测 + 生成 YAML          │          └ <model>-deploy.yaml
+└──────────────────────────────────┘
+                    │ apply
+                    ▼
+┌──────────────────────────────────┐          ┌─────────────────────────────────────┐
+│ k8s_apply.sh <yaml>              │          │ [deploy] bash vllm_server.sh <conf> │
+│  [deploy] apply + 等待 Ready     │ kubectl  │   └ exec python3 -m vllm...         │
+│           API 测试 + 打印命令    │ ──────►  │                                     │
+│  [pod]    apply + 等待 Running   │          │ [pod]    sleep infinity              │
+│           写 run script 到 pod   │          │   → 用户手动运行 run script          │
+│           进入交互式 shell        │          └─────────────────────────────────────┘
+└──────────────────────────────────┘
 ```
 
 `vllm_server.sh` 挂载到容器中（Docker 通过 `/home` bind-mount，k8s 通过 hostPath volume），
@@ -47,9 +50,9 @@ infer/llm/
 ├── model_registry.conf   # 模型库：本地路径 + HuggingFace/ModelScope ID（多框架共享）
 └── vllm/
     ├── vllm_server.sh        # 容器内脚本：加载 conf → 查 registry → exec vllm
-    ├── run_docker.sh         # Docker 外层：GPU 选择 + 容器启动 + 健康轮询
-    ├── k8s_yaml_gen.sh       # k8s YAML 生成器：根据 conf 输出 YAML 到 k8s_yaml_gen/
-    ├── test_k8s.sh           # k8s 部署测试：apply YAML + 等待就绪 + API 测试 + 打印命令
+    ├── run_docker.sh         # Docker 外层：GPU 选择 + 容器启动；默认交互式，--run 直接拉起 server
+    ├── k8s_yaml_gen.sh       # k8s YAML 生成器：--task pod|deploy，输出 YAML 到 k8s_yaml_gen/
+    ├── k8s_apply.sh          # k8s 部署：apply YAML；deploy 自动测试，pod 进入交互式 shell
     ├── configs/
     │   ├── bge-m3.conf         # bge-m3（embedding，端口 28800，k8s NodePort 30800）
     │   ├── qwen3-32b.conf      # Qwen3-32B（chat，端口 28800，k8s NodePort 30801）
@@ -60,8 +63,9 @@ infer/llm/
     │   ├── convert-to-compressed.py  # Stage 2：BF16 → INT8 packed（torchrun 分布式）
     │   └── utils.py            # 量化辅助函数
     ├── k8s_yaml_gen/         # 生成的 k8s YAML（临时文件，可按需修改后应用）
-    │   ├── bge-m3.yaml
-    │   └── qwen3-32b.yaml
+    │   ├── bge-m3-deploy.yaml       # Deployment + Service
+    │   ├── bge-m3-pod.yaml          # Pod（交互式调试）
+    │   └── qwen3-32b-deploy.yaml
     └── logs/                 # 启动 / 量化日志（自动生成）
 ```
 
@@ -85,7 +89,7 @@ infer/llm/
 
 ```bash
 cd infer/llm/vllm
-sudo bash run_docker.sh <config>
+sudo bash run_docker.sh [--run] <config>
 ```
 
 `<config>` 支持三种形式：
@@ -96,26 +100,40 @@ sudo bash run_docker.sh configs/qwen3-32b.conf   # 相对路径
 sudo bash run_docker.sh /abs/path/to/custom.conf # 绝对路径
 ```
 
-### 1.2 脚本行为
+### 1.2 两种运行模式
 
+| 模式 | 命令 | 行为 |
+|------|------|------|
+| **交互式**（默认） | `sudo bash run_docker.sh bge-m3` | 启动容器后进入容器交互式 shell，切换到日志目录，用户手动运行 server 脚本 |
+| **直接启动** | `sudo bash run_docker.sh --run bge-m3` | 启动容器并自动 exec server，宿主机轮询 `/health`，打印测试命令后退出 |
+
+### 1.3 脚本行为
+
+两种模式的公共步骤：
 1. 加载配置文件，查找模型权重（如缺失则询问下载）
 2. 用 `brsmi` 查询空闲 GPU，选取 `tp × pp` 张
-3. 启动 Docker 容器，仅映射所需的 `/dev/biren/card_N` 设备
-4. 挂载 `/home:/home`（使 `vllm_server.sh` 在容器内可见）
-5. 容器内由 ENTRYPOINT → `vllm_server.sh` → `exec python3 -m vllm...` 完成启动
-6. 宿主机轮询 `/health` 端点，最多等待 600 秒
+3. 启动 Docker 容器（PID 1 = `sleep infinity`），映射 `/dev/biren/card_N` 设备，bind-mount `/home:/home`
+4. 在 `logs/` 目录写入 `run_vllm_<model>_server.sh`（通过 `/home` bind-mount 对容器可见）
 
-### 1.3 容器管理
+**交互式模式（默认）**：写好 run script 后进入容器 bash，切换到 `logs/` 目录并打印提示。用户手动执行：
+```bash
+bash run_vllm_bge-m3_server.sh
+```
 
-容器名为 `vllm_<model_weights>`，日志写入 `logs/vllm_<model>_<timestamp>.log`：
+**`--run` 模式**：在容器内后台 exec run script，宿主机轮询 `/health` 端点（最多 600 秒），就绪后打印 curl 测试命令。
+
+### 1.4 容器管理
+
+容器名为 `vllm_<model_weights>`，日志（`--run` 模式）写入 `logs/vllm_<model>_<timestamp>.log`：
 
 ```bash
 sudo docker logs -f vllm_bge-m3
+tail -f infer/llm/vllm/logs/vllm_bge-m3_<timestamp>.log
 sudo docker stop vllm_bge-m3
 sudo docker rm   vllm_bge-m3
 ```
 
-### 1.4 curl 测试
+### 1.5 curl 测试
 
 **bge-m3（嵌入）：**
 ```bash
@@ -133,7 +151,15 @@ curl -s http://127.0.0.1:28800/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-> Docker 方式两个模型都使用端口 28800，不能同时运行。若需同时运行，修改其中一个 conf 的 `port` 字段。
+**minimax-m2.5（对话，INT8）：**
+```bash
+curl -s http://127.0.0.1:20027/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "/data/models/MiniMax/MiniMax-M2.5-INT8", "messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 64}' \
+  | python3 -m json.tool
+```
+
+> Docker 方式 bge-m3 和 qwen3-32b 都使用端口 28800，不能同时运行。若需同时运行，修改其中一个 conf 的 `port` 字段。
 
 ---
 
@@ -162,52 +188,75 @@ EOF
 
 > **注意：** RuntimeClass 使用 `handler: runc`（标准 runc），GPU 设备访问通过 `privileged: true` + `BIREN_VISIBLE_DEVICES` 环境变量实现，SDK 库路径通过 `biren-driver` hostPath volume（`/usr/local/birensupa/driver`）挂载提供——`k8s_yaml_gen.sh` 自动将这三项写入生成的 YAML。
 
-### 2.2 典型工作流
+### 2.2 两种任务类型
+
+| 类型 | 生成命令 | YAML 文件 | 行为 |
+|------|---------|----------|------|
+| **deploy** | `--task deploy` | `<model>-deploy.yaml` | Deployment + NodePort Service；自动启动 server，支持就绪探针 |
+| **pod** | `--task pod` | `<model>-pod.yaml` | 单 Pod；容器 idle（sleep infinity），进入交互式 shell 手动启动 |
+
+### 2.3 典型工作流
+
+**Deployment 方式（生产推荐）：**
 
 ```bash
 cd infer/llm/vllm
 
-# Step 1：生成 YAML（可在部署前检查或修改）
-bash k8s_yaml_gen.sh bge-m3
-# → 保存到 k8s_yaml_gen/bge-m3.yaml
+# Step 1：生成 YAML
+bash k8s_yaml_gen.sh --task deploy bge-m3
+# → 保存到 k8s_yaml_gen/bge-m3-deploy.yaml
 
 # Step 2：（可选）查看 / 修改 YAML
-cat k8s_yaml_gen/bge-m3.yaml
+cat k8s_yaml_gen/bge-m3-deploy.yaml
 
 # Step 3：部署并自动测试 API
-bash test_k8s.sh k8s_yaml_gen/bge-m3.yaml
+bash k8s_apply.sh k8s_yaml_gen/bge-m3-deploy.yaml
 ```
 
-两个模型可同时部署（NodePort 不同，互不冲突）：
+**Pod 方式（调试 / 手动控制）：**
 
 ```bash
-bash k8s_yaml_gen.sh bge-m3    && bash test_k8s.sh k8s_yaml_gen/bge-m3.yaml
-bash k8s_yaml_gen.sh qwen3-32b && bash test_k8s.sh k8s_yaml_gen/qwen3-32b.yaml
+bash k8s_yaml_gen.sh --task pod bge-m3
+# → 保存到 k8s_yaml_gen/bge-m3-pod.yaml
+
+bash k8s_apply.sh k8s_yaml_gen/bge-m3-pod.yaml [/my/log/dir]
+# → 等待 Pod Running，写入 run_vllm_bge-m3_server.sh，进入 pod 交互式 shell
+# 在 shell 内执行：
+# bash run_vllm_bge-m3_server.sh
 ```
 
-### 2.3 `k8s_yaml_gen.sh` 行为
+多模型同时部署（NodePort 不同，互不冲突）：
 
+```bash
+bash k8s_yaml_gen.sh --task deploy bge-m3    && bash k8s_apply.sh k8s_yaml_gen/bge-m3-deploy.yaml
+bash k8s_yaml_gen.sh --task deploy qwen3-32b && bash k8s_apply.sh k8s_yaml_gen/qwen3-32b-deploy.yaml
+```
+
+### 2.4 `k8s_yaml_gen.sh` 行为
+
+- 必须传入 `--task pod|deploy` 参数
 - 加载 conf，查找模型权重（如缺失则询问下载）
 - 自动探测具有足够 GPU 资源的节点（或使用 `k8s_node_name` 指定）
-- 生成完整的 Namespace + Deployment + Service YAML 保存到 `k8s_yaml_gen/<model>.yaml`
-- **不执行 apply**，便于在部署前检查或修改 YAML
+- **deploy**：生成 Namespace + Deployment + Service YAML，包含就绪/存活探针
+- **pod**：生成 Namespace + Pod YAML（`restartPolicy: Never`，args 为 `sleep infinity`，无 Service）
+- 输出文件：`k8s_yaml_gen/<model>-<type>.yaml`，**不执行 apply**
 
-### 2.4 `test_k8s.sh` 行为
+### 2.5 `k8s_apply.sh` 行为
 
-- 解析 YAML 中的元数据（namespace、app label、nodeport、config 路径等）
-- `kubectl apply -f <yaml>` 应用资源
-- 等待 Pod 变为 Ready（超时时间从 YAML readiness probe 初始延迟推算）
-- 自动执行 API 调用验证（embedding 或 chat completion）
-- 打印后续可用的 kubectl 命令
+- 自动检测 YAML 中的任务类型（Deployment / Pod）
+- 解析 `vllm.io/config-file` 和 `vllm.io/server-script` 注解获取配置路径
+- **deploy**：`kubectl apply`，等待 Pod 变为 Ready，自动 API 测试，打印管理命令
+- **pod**：`kubectl apply`，等待 Pod 变为 Running，写入 run script 到 pod 内，进入交互式 shell
 
-### 2.5 端口说明
+### 2.6 端口说明
 
 | 模型 | containerPort | NodePort | 访问地址 |
 |------|--------------|----------|---------|
 | bge-m3 | 28800 | **30800** | `http://<node-ip>:30800` |
 | qwen3-32b | 28800 | **30801** | `http://<node-ip>:30801` |
+| minimax-m2.5 | 20027 | **30802** | `http://<node-ip>:30802` |
 
-### 2.6 curl 测试
+### 2.7 curl 测试
 
 > 若系统配置了 HTTP 代理（`http_proxy`），需添加 `--noproxy "*"` 参数。
 
@@ -223,13 +272,20 @@ curl -s --noproxy "*" http://172.25.198.37:30801/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model": "Qwen/Qwen3-32B", "messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 64}' \
   | python3 -m json.tool
+
+# minimax-m2.5（NodePort 30802）
+curl -s --noproxy "*" http://172.25.198.37:30802/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "/data/models/MiniMax/MiniMax-M2.5-INT8", "messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 64}' \
+  | python3 -m json.tool
 ```
 
-### 2.7 清理
+### 2.8 清理
 
 ```bash
 kubectl delete deployment/vllm-bge-m3 service/vllm-bge-m3 -n vllm
 kubectl delete deployment/vllm-qwen3-32b service/vllm-qwen3-32b -n vllm
+kubectl delete pod/vllm-bge-m3 -n vllm   # pod 方式
 # 或删除整个 namespace
 kubectl delete namespace vllm
 ```
@@ -295,12 +351,18 @@ modelscope_id=Qwen/Qwen3-32B
 cp configs/qwen3-32b.conf configs/my-model.conf
 # 修改 model_weights、port、tp/pp、k8s_nodeport
 
-# 3. Docker 启动
+# 3. Docker 启动（交互式）
 sudo bash run_docker.sh my-model
+# 或直接拉起 server：
+sudo bash run_docker.sh --run my-model
 
-# 4. k8s 启动
-bash k8s_yaml_gen.sh my-model
-bash test_k8s.sh k8s_yaml_gen/my-model.yaml
+# 4. k8s 启动（deploy 方式）
+bash k8s_yaml_gen.sh --task deploy my-model
+bash k8s_apply.sh k8s_yaml_gen/my-model-deploy.yaml
+
+# k8s 启动（pod 交互式调试）
+bash k8s_yaml_gen.sh --task pod my-model
+bash k8s_apply.sh k8s_yaml_gen/my-model-pod.yaml
 ```
 
 ---
