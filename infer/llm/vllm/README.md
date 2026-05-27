@@ -59,8 +59,8 @@ infer/llm/
     │   └── minimax-m2.5.conf   # MiniMax M2.5（chat MoE，INT8，端口 20027，k8s NodePort 30802）
     ├── quant/                # 权重量化工具
     │   ├── run_quant.sh        # 一键量化：FP8 → BF16 → INT8（在 BirenTech 容器内运行）
-    │   ├── cast_fp8_bf16.py    # Stage 1：FP8 safetensors → BF16
-    │   ├── convert-to-compressed.py  # Stage 2：BF16 → INT8 packed（torchrun 分布式）
+    │   ├── cast_fp8_bf16.py    # Stage 1：FP8 safetensors → BF16（单进程 CPU）
+    │   ├── convert_int8_cpu.py # Stage 2：BF16 → INT8 packed（单进程 CPU，shard index 驱动）
     │   └── utils.py            # 量化辅助函数
     ├── k8s_yaml_gen/         # 生成的 k8s YAML（临时文件，可按需修改后应用）
     │   ├── bge-m3-deploy.yaml       # Deployment + Service
@@ -388,13 +388,15 @@ brsmi gpu --query-gpu=index,memory.used,memory.free --format=csv,noheader
 ### 6.1 量化流程
 
 ```
-FP8 权重  ──[cast_fp8_bf16.py]──►  BF16 临时权重  ──[convert-to-compressed.py]──►  INT8 权重
+FP8 权重  ──[cast_fp8_bf16.py]──►  BF16 临时权重  ──[convert_int8_cpu.py]──►  INT8 权重
 ```
 
 | Stage | 脚本 | 方式 | 说明 |
 |-------|------|------|------|
-| Stage 1 | `quant/cast_fp8_bf16.py` | 单进程 | FP8 safetensors 反量化为 BF16 |
-| Stage 2 | `quant/convert-to-compressed.py` | `torchrun` 8 进程 | BF16 → channel-wise INT8 packed |
+| Stage 1 | `quant/cast_fp8_bf16.py` | 单进程 CPU | FP8 safetensors 反量化为 BF16 |
+| Stage 2 | `quant/convert_int8_cpu.py` | 单进程 CPU | BF16 → channel-wise symmetric INT8 packed；shard index 驱动，无需 GPU |
+
+量化方案：`strategy=channel`，`symmetric=True`，`num_bits=8`，生成 `compressed-tensors` pack-quantized 格式，可被 BR vllm 26.05.14 直接加载（无需任何框架 patch）。
 
 ### 6.2 一键量化
 
