@@ -27,7 +27,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODEL_REGISTRY="${SCRIPT_DIR}/../model_registry.conf"
+_REGISTRY_SH="${SCRIPT_DIR}/../model_registry.sh"
 
 _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
 _ok()   { echo -e "\033[1;32m[ OK ]\033[0m  $*"; }
@@ -83,13 +83,11 @@ port=8000
 source "$CONFIG_FILE"
 
 # ── Registry lookup (for model API path) ──────────────────────────────────────
-registry_get() {
-    awk -v sec="[$1]" -v fld="$2" '
-        /^\[/ { cur = $0 }
-        cur == sec && match($0, "^" fld "=") { print substr($0, length(fld)+2); exit }
-    ' "$MODEL_REGISTRY"
-}
-MODEL_LOCAL_PATH=$(registry_get "$model_weights" "local_path")
+[[ ! -f "$_REGISTRY_SH" ]] && { _err "model_registry.sh not found: $_REGISTRY_SH"; exit 1; }
+# shellcheck source=../model_registry.sh
+source "$_REGISTRY_SH"
+parse_model "$model_weights" || exit 1
+MODEL_LOCAL_PATH="$MODEL_PATH"
 MODEL_API="${served_model_name:-${MODEL_LOCAL_PATH}}"
 
 # ── Resolve node IP ───────────────────────────────────────────────────────────

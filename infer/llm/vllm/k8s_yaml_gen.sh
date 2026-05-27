@@ -1,20 +1,34 @@
 #!/usr/bin/env bash
 # Generate a Kubernetes YAML for a vLLM server.
-# Saves the result to k8s_yaml_gen/<model>-<type>.yaml (does not apply it).
+# Saves the result to k8s_yaml_gen/<model>-<type>[...].yaml (does not apply it).
 #
 # Usage:
-#   bash k8s_yaml_gen.sh --task <pod|deploy> <config_file>
+#   bash k8s_yaml_gen.sh --task <pod|deploy> [options] <config_file>
 #
-#   --task deploy  Deployment + NodePort Service  (server auto-starts at launch)
-#   --task pod     Interactive Pod only           (server script written; user starts manually)
+# Required:
+#   --task <pod|deploy>    Workload type.
+#
+# Scheduling (mutually exclusive; default: k8s scheduler decides):
+#   --node <nodename>      Hard-pin to a specific node (nodeName).
+#   --label <key=value>    Node label selector (nodeSelector).
+#
+# Resources (per-instance; defaults: cpu=32, mem=128Gi/GPU):
+#   --cpu <n>              CPU cores (request=n, limit=2n). Default: 32.
+#   --mem-per-gpu <n>      Memory per GPU in Gi (request=limit=n×gpus). Default: 128.
+#
+# Scale (deploy only):
+#   --replicas <n>         Number of Deployment replicas. Default: 1.
 #
 # config_file may be:
 #   - a bare model name: bge-m3  (resolved to configs/bge-m3.conf)
 #   - a relative path:   configs/bge-m3.conf
 #   - an absolute path:  /path/to/any.conf
 #
+# Output filename:
+#   k8s_yaml_gen/<model>-<type>[-node-<n>|-label-<v>]-p<port>[-r<replicas>].yaml
+#
 # After generating, review the YAML and apply with:
-#   bash k8s_apply.sh k8s_yaml_gen/<model>-<type>.yaml
+#   bash k8s_apply.sh k8s_yaml_gen/<model>-<type>[...].yaml
 
 set -euo pipefail
 
@@ -34,10 +48,20 @@ _err()  { echo -e "\033[0;31m[ERR ]\033[0m  $*" >&2; }
 
 usage() {
     echo ""
-    echo "Usage: $0 --task <pod|deploy> <config_file>"
+    echo "Usage: $0 --task <pod|deploy> [options] <config_file>"
     echo ""
-    echo "  --task deploy  Generate a Deployment + NodePort Service YAML (server auto-starts)"
-    echo "  --task pod     Generate an interactive Pod YAML (server script prepared; user starts manually)"
+    echo "  --task <pod|deploy>    Required. Workload type."
+    echo ""
+    echo "  Scheduling (mutually exclusive; default: no constraint):"
+    echo "  --node <nodename>      Pin to a specific node (nodeName)."
+    echo "  --label <key=value>    Node label selector (nodeSelector)."
+    echo ""
+    echo "  Resources:"
+    echo "  --cpu <n>              CPU cores per replica (default: 32; limit=2n)."
+    echo "  --mem-per-gpu <n>      Memory in Gi per GPU (default: 128; request=limit=n×gpus)."
+    echo ""
+    echo "  Scale (deploy only):"
+    echo "  --replicas <n>         Deployment replicas (default: 1)."
     echo ""
     echo "Available configs:"
     for f in "${SCRIPT_DIR}/configs/"*.conf; do
@@ -50,12 +74,32 @@ usage() {
 # ── Parse arguments ────────────────────────────────────────────────────────────
 K8S_TYPE=""
 CONFIG_ARG=""
+OPT_NODE=""
+OPT_LABEL=""
+OPT_CPU=32
+OPT_MEM_PER_GPU=128
+OPT_REPLICAS=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --task)
             [[ $# -lt 2 ]] && { _err "--task requires an argument (pod|deploy)"; usage; }
             K8S_TYPE="$2"; shift 2 ;;
+        --node)
+            [[ $# -lt 2 ]] && { _err "--node requires a nodename argument"; usage; }
+            OPT_NODE="$2"; shift 2 ;;
+        --label)
+            [[ $# -lt 2 ]] && { _err "--label requires a key=value argument"; usage; }
+            OPT_LABEL="$2"; shift 2 ;;
+        --cpu)
+            [[ $# -lt 2 ]] && { _err "--cpu requires a numeric argument"; usage; }
+            OPT_CPU="$2"; shift 2 ;;
+        --mem-per-gpu)
+            [[ $# -lt 2 ]] && { _err "--mem-per-gpu requires a numeric argument"; usage; }
+            OPT_MEM_PER_GPU="$2"; shift 2 ;;
+        --replicas)
+            [[ $# -lt 2 ]] && { _err "--replicas requires a numeric argument"; usage; }
+            OPT_REPLICAS="$2"; shift 2 ;;
         -*)
             _err "Unknown option: $1"; usage ;;
         *)
@@ -63,10 +107,21 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ── Validate arguments ─────────────────────────────────────────────────────────
 [[ -z "$K8S_TYPE" ]] && { _err "--task is required."; usage; }
 [[ "$K8S_TYPE" != "pod" && "$K8S_TYPE" != "deploy" ]] && {
     _err "--task must be 'pod' or 'deploy', got: '${K8S_TYPE}'"; usage; }
 [[ -z "$CONFIG_ARG" ]] && { _err "A config file is required."; usage; }
+[[ -n "$OPT_NODE" && -n "$OPT_LABEL" ]] && {
+    _err "--node and --label are mutually exclusive."; usage; }
+[[ -n "$OPT_LABEL" && "$OPT_LABEL" != *=* ]] && {
+    _err "--label must be in key=value format, got: '${OPT_LABEL}'"; exit 1; }
+[[ ! "$OPT_CPU" =~ ^[0-9]+$ || "$OPT_CPU" -lt 1 ]] && {
+    _err "--cpu must be a positive integer"; exit 1; }
+[[ ! "$OPT_MEM_PER_GPU" =~ ^[0-9]+$ || "$OPT_MEM_PER_GPU" -lt 1 ]] && {
+    _err "--mem-per-gpu must be a positive integer"; exit 1; }
+[[ ! "$OPT_REPLICAS" =~ ^[0-9]+$ || "$OPT_REPLICAS" -lt 1 ]] && {
+    _err "--replicas must be a positive integer"; exit 1; }
 
 # ── Resolve config ─────────────────────────────────────────────────────────────
 CONFIG_FILE=""
@@ -100,7 +155,6 @@ distributed_executor_backend=""
 compilation_config=""
 model_weights=""
 k8s_nodeport=""
-k8s_node_name=""
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
@@ -143,34 +197,68 @@ else
     _ok "Downloaded  : $MODEL_LOCAL_PATH"
 fi
 
-# ── Resolve k8s node ──────────────────────────────────────────────────────────
+# ── GPU count and resource sizing ─────────────────────────────────────────────
 gpu_needed=$((tensor_parallel_size * pipeline_parallel_size))
-_info "GPU needed  : tp=$tensor_parallel_size × pp=$pipeline_parallel_size = $gpu_needed"
+cpu_lim=$((OPT_CPU * 2))
+mem_gi=$((gpu_needed * OPT_MEM_PER_GPU))
 
-if [[ -n "$k8s_node_name" ]]; then
-    NODE_NAME="$k8s_node_name"
-    _info "Node        : $NODE_NAME (from config)"
+_info "GPU needed  : tp=$tensor_parallel_size × pp=$pipeline_parallel_size = $gpu_needed"
+_info "Resources   : cpu req=${OPT_CPU} lim=${cpu_lim}  mem=${mem_gi}Gi (${OPT_MEM_PER_GPU}Gi/GPU)"
+[[ "$K8S_TYPE" == "deploy" ]] && _info "Replicas    : ${OPT_REPLICAS}"
+
+# ── Resolve node scheduling ───────────────────────────────────────────────────
+if [[ -n "$OPT_NODE" ]]; then
+    SCHED_TYPE="node"
+    _info "Scheduling  : nodeName=${OPT_NODE}"
+elif [[ -n "$OPT_LABEL" ]]; then
+    SCHED_TYPE="label"
+    LABEL_KEY="${OPT_LABEL%%=*}"
+    LABEL_VAL="${OPT_LABEL#*=}"
+    _info "Scheduling  : nodeSelector ${LABEL_KEY}=${LABEL_VAL}"
 else
-    NODE_NAME=$(kubectl get nodes \
-        -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.allocatable.birentech\.com/gpu}{"\n"}{end}' \
-        2>/dev/null | awk -v need="$gpu_needed" '$2+0 >= need { print $1; exit }')
-    [[ -z "$NODE_NAME" ]] && {
-        _err "No node with >= $gpu_needed birentech.com/gpu available."
-        kubectl get nodes -o wide 2>/dev/null || true
-        exit 1; }
-    _info "Node        : $NODE_NAME (auto-detected)"
+    SCHED_TYPE="none"
+    # Validate cluster has at least one node with sufficient GPU capacity
+    _avail=$(kubectl get nodes \
+        -o jsonpath='{range .items[*]}{.status.allocatable.birentech\.com/gpu}{"\n"}{end}' \
+        2>/dev/null | awk -v need="$gpu_needed" 'BEGIN{ok=0} $1+0>=need{ok=1} END{print ok}' || echo 0)
+    if [[ "$_avail" != "1" ]]; then
+        _warn "No single node with >= $gpu_needed birentech.com/gpu found; k8s scheduler will decide."
+    fi
+    _info "Scheduling  : (none — k8s scheduler decides)"
 fi
 
-# ── Derived resource values ───────────────────────────────────────────────────
-cpu_req=$((gpu_needed * 8))
-cpu_lim=$((gpu_needed * 16))
-mem_req_gi=$((gpu_needed * 32))
-mem_lim_gi=$((gpu_needed * 80))
+# ── Scheduling YAML snippets ──────────────────────────────────────────────────
+# deploy template.spec uses 6-space indent; pod spec uses 2-space indent
+if [[ "$SCHED_TYPE" == "node" ]]; then
+    _sched_deploy="      nodeName: ${OPT_NODE}"
+    _sched_pod="  nodeName: ${OPT_NODE}"
+elif [[ "$SCHED_TYPE" == "label" ]]; then
+    _sched_deploy="      nodeSelector:
+        ${LABEL_KEY}: ${LABEL_VAL}"
+    _sched_pod="  nodeSelector:
+    ${LABEL_KEY}: ${LABEL_VAL}"
+else
+    _sched_deploy=""
+    _sched_pod=""
+fi
 
-initial_delay_ready=$(( gpu_needed * 120 + 60 ))
-initial_delay_live=$(( gpu_needed * 180 + 60 ))
+# ── Build output filename ─────────────────────────────────────────────────────
+_sched_suffix=""
+if [[ "$SCHED_TYPE" == "node" ]]; then
+    _sched_suffix="-node-${OPT_NODE//./-}"
+elif [[ "$SCHED_TYPE" == "label" ]]; then
+    # Use just the value part, sanitized
+    _safe_val="${LABEL_VAL//[^a-zA-Z0-9_-]/-}"
+    _sched_suffix="-label-${_safe_val}"
+fi
 
-# k8s names must match DNS-1035: dots not allowed — replace with dashes
+if [[ "$K8S_TYPE" == "deploy" ]]; then
+    OUT_YAML="${YAML_DIR}/${model_weights}-deploy${_sched_suffix}-p${port}-r${OPT_REPLICAS}.yaml"
+else
+    OUT_YAML="${YAML_DIR}/${model_weights}-pod${_sched_suffix}-p${port}.yaml"
+fi
+
+# ── k8s names (DNS-1035: dots not allowed — replace with dashes) ──────────────
 k8s_name="${model_weights//./-}"
 APP_LABEL="vllm-${k8s_name}"
 DEPLOY_NAME="vllm-${k8s_name}"
@@ -180,18 +268,20 @@ POD_NAME="vllm-${k8s_name}"
 INNER_SCRIPT="${SCRIPT_DIR}/vllm_server.sh"
 LLM_DIR="$(dirname "${SCRIPT_DIR}")"
 
-# Build BIREN_VISIBLE_DEVICES string: e.g. "0,1" for gpu_needed=2
+# Build BIREN_VISIBLE_DEVICES: "0,1,...,N-1"
 _biren_visible=""
 for (( _i=0; _i<gpu_needed; _i++ )); do
     [[ -n "$_biren_visible" ]] && _biren_visible="${_biren_visible},"
     _biren_visible="${_biren_visible}${_i}"
 done
 
+initial_delay_ready=$(( gpu_needed * 120 + 60 ))
+initial_delay_live=$(( gpu_needed * 180 + 60 ))
+
 # ── Write YAML ─────────────────────────────────────────────────────────────────
 mkdir -p "$YAML_DIR"
-OUT_YAML="${YAML_DIR}/${model_weights}-${K8S_TYPE}.yaml"
 
-# Shared volume/volumeMount snippet used by both types
+# Shared volume/volumeMount snippets (Deployment template indent = 8 spaces)
 _vol_mounts="        volumeMounts:
         - name: dshm
           mountPath: /dev/shm
@@ -247,7 +337,7 @@ _volumes="      volumes:
 if [[ "$K8S_TYPE" == "deploy" ]]; then
 
 cat > "$OUT_YAML" <<YAML
-# Generated by k8s_yaml_gen.sh  model=${model_weights}  config=$(basename "$CONFIG_FILE")  task=deploy
+# Generated by k8s_yaml_gen.sh  model=${model_weights}  config=$(basename "$CONFIG_FILE")  task=deploy  replicas=${OPT_REPLICAS}
 ---
 apiVersion: v1
 kind: Namespace
@@ -267,7 +357,7 @@ metadata:
     app: ${APP_LABEL}
     model: ${model_weights}
 spec:
-  replicas: 1
+  replicas: ${OPT_REPLICAS}
   selector:
     matchLabels:
       app: ${APP_LABEL}
@@ -280,7 +370,7 @@ spec:
       # RuntimeClass 'biren' uses handler: runc (standard runc + manual workarounds below).
       # GPU devices: privileged + BIREN_VISIBLE_DEVICES.  SDK libs: biren-driver hostPath volume.
       runtimeClassName: biren
-      nodeName: ${NODE_NAME}
+${_sched_deploy}
       containers:
       - name: vllm-server
         image: ${CONTAINER_IMAGE}
@@ -307,12 +397,12 @@ spec:
         resources:
           requests:
             birentech.com/gpu: "${gpu_needed}"
-            cpu: "${cpu_req}"
-            memory: "${mem_req_gi}Gi"
+            cpu: "${OPT_CPU}"
+            memory: "${mem_gi}Gi"
           limits:
             birentech.com/gpu: "${gpu_needed}"
             cpu: "${cpu_lim}"
-            memory: "${mem_lim_gi}Gi"
+            memory: "${mem_gi}Gi"
         securityContext:
           privileged: true
           capabilities:
@@ -360,7 +450,7 @@ YAML
 
 else  # pod
 
-# Pod-level volume/volumeMount indentation is 4 spaces less than in Deployment template
+# Pod-level volume/volumeMount indent = 4 spaces (container) / 2 spaces (volumes)
 _pod_vol_mounts="    volumeMounts:
     - name: dshm
       mountPath: /dev/shm
@@ -437,7 +527,7 @@ spec:
   # RuntimeClass 'biren' uses handler: runc.
   # GPU devices: privileged + BIREN_VISIBLE_DEVICES.  SDK libs: biren-driver hostPath volume.
   runtimeClassName: biren
-  nodeName: ${NODE_NAME}
+${_sched_pod}
   restartPolicy: Never
   containers:
   - name: vllm-server
@@ -460,12 +550,12 @@ spec:
     resources:
       requests:
         birentech.com/gpu: "${gpu_needed}"
-        cpu: "${cpu_req}"
-        memory: "${mem_req_gi}Gi"
+        cpu: "${OPT_CPU}"
+        memory: "${mem_gi}Gi"
       limits:
         birentech.com/gpu: "${gpu_needed}"
         cpu: "${cpu_lim}"
-        memory: "${mem_lim_gi}Gi"
+        memory: "${mem_gi}Gi"
     securityContext:
       privileged: true
       capabilities:
