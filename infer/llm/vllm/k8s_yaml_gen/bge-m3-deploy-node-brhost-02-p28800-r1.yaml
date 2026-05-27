@@ -34,7 +34,7 @@ spec:
       nodeName: brhost-02
       containers:
       - name: vllm-server
-        image: 172.25.198.36:32000/infer/birensupa-smartinfer-vllm:26.04.rc2-py310-pt2.8.0-br1xx
+        image: 172.25.198.36:32000/infer/birensupa-smartinfer-vllm:26.05.14-py310-pt2.8.0-br1xx
         imagePullPolicy: IfNotPresent
         # No 'command' field — preserves the image ENTRYPOINT (biren_entrypoint.sh),
         # which sets LD_LIBRARY_PATH before exec'ing the args.

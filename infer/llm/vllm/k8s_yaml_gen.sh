@@ -36,7 +36,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 _REGISTRY_SH="${SCRIPT_DIR}/../model_registry.sh"
-CONTAINER_IMAGE='172.25.198.36:32000/infer/birensupa-smartinfer-vllm:26.04.rc2-py310-pt2.8.0-br1xx'
+CONTAINER_IMAGE='172.25.198.36:32000/infer/birensupa-smartinfer-vllm:26.05.14-py310-pt2.8.0-br1xx'
 K8S_NAMESPACE='vllm'
 YAML_DIR="${SCRIPT_DIR}/k8s_yaml_gen"
 

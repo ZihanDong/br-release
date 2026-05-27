@@ -21,7 +21,8 @@ spec:
   # RuntimeClass 'biren' uses handler: runc.
   # GPU devices: privileged + BIREN_VISIBLE_DEVICES.  SDK libs: biren-driver hostPath volume.
   runtimeClassName: biren
-  nodeName: brhost-02
+  nodeSelector:
+    node-pool: gpu-a
   restartPolicy: Never
   containers:
   - name: vllm-server
@@ -44,12 +45,12 @@ spec:
     resources:
       requests:
         birentech.com/gpu: "2"
-        cpu: "16"
-        memory: "64Gi"
+        cpu: "32"
+        memory: "256Gi"
       limits:
         birentech.com/gpu: "2"
-        cpu: "32"
-        memory: "160Gi"
+        cpu: "64"
+        memory: "256Gi"
     securityContext:
       privileged: true
       capabilities:
@@ -63,9 +64,6 @@ spec:
       readOnly: true
     - name: vllm-scripts
       mountPath: /home/br166/br-release/infer/llm/vllm
-      readOnly: true
-    - name: patch-parameter
-      mountPath: /usr/local/lib/python3.10/dist-packages/vllm_br/model_executor/parameter.py
       readOnly: true
     - name: model-registry
       mountPath: /home/br166/br-release/infer/llm/model_registry.sh
@@ -89,10 +87,6 @@ spec:
     hostPath:
       path: /home/br166/br-release/infer/llm/vllm
       type: Directory
-  - name: patch-parameter
-    hostPath:
-      path: /home/br166/br-release/infer/llm/vllm/patches/vllm_br_parameter.py
-      type: File
   - name: model-registry
     hostPath:
       path: /home/br166/br-release/infer/llm/model_registry.sh
