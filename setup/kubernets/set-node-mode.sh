@@ -230,6 +230,50 @@ _no_gpu_nodes_left() {
     [[ "${count}" -eq 0 ]]
 }
 
+# ── RuntimeClass 管理 ─────────────────────────────────────────────────────────
+# handler 字段不可变更（immutable），需先删后建。
+# biren 模式：handler: biren → containerd 使用 biren-container-runtime，
+#             注入 /dev/biren-m 和分配的 /dev/biren/card_N，GPU 容器可正常运行。
+# cpu/none 模式：集群内无 GPU 节点时恢复 handler: runc（标准容器运行时）。
+_set_runtimeclass_handler() {
+    local handler="$1"
+    local current
+    current=$(kubectl get runtimeclass biren ${KC} \
+        -o jsonpath='{.handler}' 2>/dev/null || echo "")
+
+    if [[ "${current}" == "${handler}" ]]; then
+        log_info "  RuntimeClass 'biren' handler 已为 ${handler}，无需变更。"
+        return
+    fi
+
+    if [[ -n "${current}" ]]; then
+        kubectl delete runtimeclass biren ${KC} >/dev/null 2>&1 || true
+    fi
+
+    kubectl apply ${KC} -f - <<EOF
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: biren
+handler: ${handler}
+EOF
+    log_info "  RuntimeClass 'biren' handler 已设为: ${handler}。"
+}
+
+apply_biren_runtimeclass() {
+    log_info "确保 RuntimeClass 'biren' 使用 biren-container-runtime..."
+    _set_runtimeclass_handler biren
+}
+
+restore_runc_runtimeclass() {
+    if _no_gpu_nodes_left; then
+        log_info "集群中已无 GPU 节点，恢复 RuntimeClass 'biren' → handler: runc..."
+        _set_runtimeclass_handler runc
+    else
+        log_info "集群中仍有其他 GPU 节点，RuntimeClass 保持 handler: biren。"
+    fi
+}
+
 # ── 打印当前节点状态 ──────────────────────────────────────────────────────────
 print_status() {
     echo
@@ -247,6 +291,11 @@ print_status() {
             2>/dev/null | tail -1 || true
     done
     echo
+    local rc_handler
+    rc_handler=$(kubectl get runtimeclass biren ${KC} \
+        -o jsonpath='{.handler}' 2>/dev/null || echo "未创建")
+    log_info "RuntimeClass 'biren' handler: ${rc_handler}"
+    echo
     if [[ "${MODE}" == "biren" ]]; then
         log_info "device plugin Pod 状态:"
         kubectl get pods -n "${PLUGIN_NAMESPACE}" -o wide ${KC} 2>/dev/null || true
@@ -263,9 +312,10 @@ print_status() {
 mode_none() {
     log_info "── 模式: none（恢复 control-plane 隔离）──"
     for node in "${_NODES[@]}"; do
-        add_taint    "${node}"
+        add_taint        "${node}"
         remove_gpu_label "${node}"
     done
+    restore_runc_runtimeclass
 }
 
 mode_cpu() {
@@ -274,6 +324,7 @@ mode_cpu() {
         remove_taint     "${node}"
         remove_gpu_label "${node}"
     done
+    restore_runc_runtimeclass
 }
 
 mode_biren() {
@@ -281,6 +332,7 @@ mode_biren() {
 
     load_plugin_image
     deploy_plugin
+    apply_biren_runtimeclass
 
     for node in "${_NODES[@]}"; do
         remove_taint  "${node}"
