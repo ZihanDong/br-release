@@ -1,7 +1,3 @@
-
-
-[WARNING]: The BIREN Driver was not detected.  GPU functionality will not be available.
-
 ################################################################################
 # Copyright(c)2020-2025 Shanghai Biren Technology Co., Ltd. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");

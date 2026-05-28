@@ -14,6 +14,12 @@ _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
 _ok()   { echo -e "\033[1;32m[ OK ]\033[0m  $*"; }
 _err()  { echo -e "\033[0;31m[ERR ]\033[0m  $*" >&2; }
 
+# quart is not pre-installed in the container image; install if missing
+python3 -c "from quart import Quart" 2>/dev/null || {
+    _info "Installing quart (not in container image)..."
+    pip3 install quart --quiet --root-user-action=ignore
+}
+
 usage() {
     echo ""
     echo "Usage: $0 <proxy_conf_file>"
