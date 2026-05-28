@@ -152,9 +152,13 @@ enforce_eager=false
 distributed_executor_backend=""
 compilation_config=""
 k8s_nodeport=""
+k8s_image=""
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
+
+# Allow per-model K8s image override via k8s_image in conf
+[[ -n "${k8s_image:-}" ]] && CONTAINER_IMAGE="$k8s_image"
 
 _missing=()
 [[ -z "${model_weights:-}" ]]         && _missing+=(model_weights)
@@ -273,13 +277,6 @@ POD_NAME="vllm-${k8s_name}"
 INNER_SCRIPT="${SCRIPT_DIR}/vllm_server.sh"
 LLM_DIR="$(dirname "${SCRIPT_DIR}")"
 
-# Build BIREN_VISIBLE_DEVICES: "0,1,...,N-1"
-_biren_visible=""
-for (( _i=0; _i<gpu_needed; _i++ )); do
-    [[ -n "$_biren_visible" ]] && _biren_visible="${_biren_visible},"
-    _biren_visible="${_biren_visible}${_i}"
-done
-
 initial_delay_ready=$(( gpu_needed * 120 + 60 ))
 initial_delay_live=$(( gpu_needed * 180 + 60 ))
 
@@ -365,8 +362,9 @@ spec:
         app: ${APP_LABEL}
         model: ${model_weights}
     spec:
-      # RuntimeClass 'biren' uses handler: runc (standard runc + manual workarounds below).
-      # GPU devices: privileged + BIREN_VISIBLE_DEVICES.  SDK libs: biren-driver hostPath volume.
+      # RuntimeClass 'biren': GPU devices allocated by birentech.com/gpu device plugin.
+      # Device plugin mounts /dev/biren/card_N via CDI; brml auto-discovers from /dev/biren/.
+      # BIREN_VISIBLE_DEVICES is NOT injected; no privileged mode needed.
       runtimeClassName: biren
 ${_sched_deploy}
       containers:
@@ -386,8 +384,6 @@ ${_sched_deploy}
           value: spawn
         - name: VLLM_BR_WEIGHT_TYPE
           value: NUMA
-        - name: BIREN_VISIBLE_DEVICES
-          value: "${_biren_visible}"
         ports:
         - name: http
           containerPort: ${port}
@@ -402,7 +398,6 @@ ${_sched_deploy}
             cpu: "${cpu_lim}"
             memory: "${mem_gi}Gi"
         securityContext:
-          privileged: true
           capabilities:
             add:
             - IPC_LOCK
@@ -515,8 +510,8 @@ metadata:
     app: ${APP_LABEL}
     model: ${model_weights}
 spec:
-  # RuntimeClass 'biren' uses handler: runc.
-  # GPU devices: privileged + BIREN_VISIBLE_DEVICES.  SDK libs: biren-driver hostPath volume.
+  # RuntimeClass 'biren': GPU devices allocated by birentech.com/gpu device plugin.
+  # Device plugin injects BIREN_VISIBLE_DEVICES and enforces cgroup device isolation.
   runtimeClassName: biren
 ${_sched_pod}
   restartPolicy: Never
@@ -536,8 +531,6 @@ ${_sched_pod}
       value: spawn
     - name: VLLM_BR_WEIGHT_TYPE
       value: NUMA
-    - name: BIREN_VISIBLE_DEVICES
-      value: "${_biren_visible}"
     resources:
       requests:
         birentech.com/gpu: "${gpu_needed}"
@@ -548,7 +541,6 @@ ${_sched_pod}
         cpu: "${cpu_lim}"
         memory: "${mem_gi}Gi"
     securityContext:
-      privileged: true
       capabilities:
         add:
         - IPC_LOCK

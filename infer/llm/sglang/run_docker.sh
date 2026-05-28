@@ -157,12 +157,12 @@ _info "GPU needed  : tp=$tensor_parallel_size × pp=$pipeline_parallel_size = $g
 
 mapfile -t free_gpus < <(
     brsmi gpu --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
-    | awk -F',' '{ gsub(/ /,"",$1); gsub(/ /,"",$2); if ($2+0 == 0) print $1 }' \
+    | awk -F',' '{ gsub(/ /,"",$1); gsub(/ /,"",$2); if ($2+0 < 512) print $1 }' \
     | head -n "$gpu_needed"
 )
 
 if [[ ${#free_gpus[@]} -lt $gpu_needed ]]; then
-    _err "Not enough free GPUs: need $gpu_needed, found ${#free_gpus[@]} with 0 MiB used."
+    _err "Not enough free GPUs: need $gpu_needed, found ${#free_gpus[@]} with <512 MiB used."
     echo ""
     brsmi gpu --query-gpu=index,memory.used,memory.free --format=csv,noheader 2>/dev/null || true
     exit 1

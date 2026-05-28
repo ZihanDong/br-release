@@ -269,13 +269,6 @@ POD_NAME="sglang-${k8s_name}"
 INNER_SCRIPT="${SCRIPT_DIR}/sglang_server.sh"
 LLM_DIR="$(dirname "${SCRIPT_DIR}")"
 
-# Build BIREN_VISIBLE_DEVICES: "0,1,...,N-1"
-_biren_visible=""
-for (( _i=0; _i<gpu_needed; _i++ )); do
-    [[ -n "$_biren_visible" ]] && _biren_visible="${_biren_visible},"
-    _biren_visible="${_biren_visible}${_i}"
-done
-
 initial_delay_ready=$(( gpu_needed * 120 + 60 ))
 initial_delay_live=$(( gpu_needed * 180 + 60 ))
 
@@ -385,8 +378,6 @@ ${_sched_deploy}
           value: "1"
         - name: BRTB_ENABLE_SUPA_FILL
           value: "1"
-        - name: BIREN_VISIBLE_DEVICES
-          value: "${_biren_visible}"
         ports:
         - name: http
           containerPort: ${port}
@@ -401,7 +392,6 @@ ${_sched_deploy}
             cpu: "${cpu_lim}"
             memory: "${mem_gi}Gi"
         securityContext:
-          privileged: true
           capabilities:
             add:
             - IPC_LOCK
@@ -538,8 +528,6 @@ ${_sched_pod}
       value: "1"
     - name: BRTB_ENABLE_SUPA_FILL
       value: "1"
-    - name: BIREN_VISIBLE_DEVICES
-      value: "${_biren_visible}"
     resources:
       requests:
         birentech.com/gpu: "${gpu_needed}"
@@ -550,7 +538,6 @@ ${_sched_pod}
         cpu: "${cpu_lim}"
         memory: "${mem_gi}Gi"
     securityContext:
-      privileged: true
       capabilities:
         add:
         - IPC_LOCK
