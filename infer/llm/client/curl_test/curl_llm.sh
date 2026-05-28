@@ -17,10 +17,10 @@ MAX_TOKENS="${MAX_TOKENS:-128}"
 
 URL="http://${HOST}:${PORT}/v1/chat/completions"
 
-echo "→ POST ${URL}"
-echo "  model=${MODEL}  max_tokens=${MAX_TOKENS}"
-echo "  prompt: ${PROMPT}"
-echo ""
+echo "→ POST ${URL}" >&2
+echo "  model=${MODEL}  max_tokens=${MAX_TOKENS}" >&2
+echo "  prompt: ${PROMPT}" >&2
+echo "" >&2
 
 curl -s --noproxy "*" --max-time 120 "${URL}" \
   -H 'Content-Type: application/json' \
