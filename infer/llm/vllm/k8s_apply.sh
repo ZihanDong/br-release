@@ -76,8 +76,6 @@ done
 # ── Load config ────────────────────────────────────────────────────────────────
 task=""
 served_model_name=""
-model_weights=""
-port=8000
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
@@ -86,6 +84,8 @@ source "$CONFIG_FILE"
 [[ ! -f "$_REGISTRY_SH" ]] && { _err "model_registry.sh not found: $_REGISTRY_SH"; exit 1; }
 # shellcheck source=../model_registry.sh
 source "$_REGISTRY_SH"
+[[ -z "${model_weights:-}" ]] && { _err "model_weights not set in $(basename "$CONFIG_FILE")"; exit 1; }
+[[ -z "${port:-}" ]]          && { _err "port not set in $(basename "$CONFIG_FILE")"; exit 1; }
 parse_model "$model_weights" || exit 1
 MODEL_LOCAL_PATH="$MODEL_PATH"
 MODEL_API="${served_model_name:-${MODEL_LOCAL_PATH}}"

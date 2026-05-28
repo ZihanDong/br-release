@@ -140,26 +140,31 @@ fi
     _err "Config not found: $CONFIG_ARG"; usage; }
 
 # ── Load config ────────────────────────────────────────────────────────────────
-port=8000
+# Required params have NO defaults and MUST be set in the config file:
+#   model_weights, port, tensor_parallel_size, pipeline_parallel_size,
+#   max_model_len, max_num_seqs
 served_model_name=""
 task=""
 dtype="auto"
-max_model_len=8192
-max_num_seqs=64
-pipeline_parallel_size=1
-tensor_parallel_size=1
 gpu_memory_utilization=0.8
 enable_chunked_prefill=false
 enforce_eager=false
 distributed_executor_backend=""
 compilation_config=""
-model_weights=""
 k8s_nodeport=""
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
 
-[[ -z "$model_weights" ]] && { _err "model_weights not set in $(basename "$CONFIG_FILE")"; exit 1; }
+_missing=()
+[[ -z "${model_weights:-}" ]]         && _missing+=(model_weights)
+[[ -z "${port:-}" ]]                   && _missing+=(port)
+[[ -z "${tensor_parallel_size:-}" ]]   && _missing+=(tensor_parallel_size)
+[[ -z "${pipeline_parallel_size:-}" ]] && _missing+=(pipeline_parallel_size)
+[[ -z "${max_model_len:-}" ]]          && _missing+=(max_model_len)
+[[ -z "${max_num_seqs:-}" ]]           && _missing+=(max_num_seqs)
+[[ ${#_missing[@]} -gt 0 ]] && {
+    _err "Required params not set in $(basename "$CONFIG_FILE"): ${_missing[*]}"; exit 1; }
 [[ "$K8S_TYPE" == "deploy" && -z "$k8s_nodeport" ]] && {
     _err "k8s_nodeport not set in $(basename "$CONFIG_FILE") (required for deploy type)"; exit 1; }
 

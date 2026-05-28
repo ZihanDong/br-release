@@ -51,13 +51,11 @@ fi
 [[ -z "$CONFIG_FILE" || ! -f "$CONFIG_FILE" ]] && {
     _err "Config not found: $CONFIG_ARG"; usage; }
 
-# ── Defaults ───────────────────────────────────────────────────────────────────
-port=28800
+# ── Defaults (optional params only) ───────────────────────────────────────────
+# Required params have NO defaults and MUST be set in the config file:
+#   model_weights, port, tensor_parallel_size, pipeline_parallel_size,
+#   max_model_len, max_running_requests
 served_model_name=""
-max_model_len=32768
-max_running_requests=64
-tensor_parallel_size=1
-pipeline_parallel_size=1
 mem_fraction_static=0.85
 page_size=128
 disable_radix_cache=false
@@ -68,7 +66,15 @@ extra_sglang_args=""
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
 
-[[ -z "$model_weights" ]] && { _err "model_weights not set in $(basename "$CONFIG_FILE")"; exit 1; }
+_missing=()
+[[ -z "${model_weights:-}" ]]         && _missing+=(model_weights)
+[[ -z "${port:-}" ]]                   && _missing+=(port)
+[[ -z "${tensor_parallel_size:-}" ]]   && _missing+=(tensor_parallel_size)
+[[ -z "${pipeline_parallel_size:-}" ]] && _missing+=(pipeline_parallel_size)
+[[ -z "${max_model_len:-}" ]]          && _missing+=(max_model_len)
+[[ -z "${max_running_requests:-}" ]]   && _missing+=(max_running_requests)
+[[ ${#_missing[@]} -gt 0 ]] && {
+    _err "Required params not set in $(basename "$CONFIG_FILE"): ${_missing[*]}"; exit 1; }
 
 _info "Config      : $(basename "$CONFIG_FILE")"
 _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
