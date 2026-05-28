@@ -21,7 +21,8 @@ spec:
   # RuntimeClass 'biren': GPU devices allocated by birentech.com/gpu device plugin.
   # Device plugin injects BIREN_VISIBLE_DEVICES and enforces cgroup device isolation.
   runtimeClassName: biren
-  nodeName: brhost-01
+  nodeSelector:
+    birentech.com: gpu
   restartPolicy: Never
   containers:
   - name: vllm-server

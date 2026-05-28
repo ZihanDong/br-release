@@ -8,9 +8,9 @@
 # Required:
 #   --task <pod|deploy>    Workload type.
 #
-# Scheduling (mutually exclusive; default: k8s scheduler decides):
+# Scheduling (mutually exclusive):
 #   --node <nodename>      Hard-pin to a specific node (nodeName).
-#   --label <key=value>    Node label selector (nodeSelector).
+#   --label <key=value>    Node label selector (default: birentech.com=gpu).
 #
 # Resources (per-instance; defaults: cpu=32, mem=128Gi/GPU):
 #   --cpu <n>              CPU cores (request=n, limit=2n). Default: 32.
@@ -52,9 +52,9 @@ usage() {
     echo ""
     echo "  --task <pod|deploy>    Required. Workload type."
     echo ""
-    echo "  Scheduling (mutually exclusive; default: no constraint):"
+    echo "  Scheduling (mutually exclusive):"
     echo "  --node <nodename>      Pin to a specific node (nodeName)."
-    echo "  --label <key=value>    Node label selector (nodeSelector)."
+    echo "  --label <key=value>    Node label selector (default: birentech.com=gpu)."
     echo ""
     echo "  Resources:"
     echo "  --cpu <n>              CPU cores per replica (default: 32; limit=2n)."
@@ -153,7 +153,6 @@ distributed_executor_backend=""
 compilation_config=""
 k8s_nodeport=""
 k8s_image=""
-k8s_node=""
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
@@ -217,43 +216,36 @@ _info "Resources   : cpu req=${OPT_CPU} lim=${cpu_lim}  mem=${mem_gi}Gi (${OPT_M
 [[ "$K8S_TYPE" == "deploy" ]] && _info "Replicas    : ${OPT_REPLICAS}"
 
 # ── Resolve node scheduling ───────────────────────────────────────────────────
-# Priority: CLI --node > CLI --label > k8s_node from conf > no constraint.
-# k8s_node in conf records which node has the weights; --node on CLI overrides it.
-# When k8s_node supplies the constraint the output filename keeps no -node-X suffix
-# so the canonical YAML name stays clean (e.g. qwen3-vl-32b-pod-p28802.yaml).
-_eff_node="${OPT_NODE:-${k8s_node:-}}"
-_node_from_conf=false
-[[ -z "$OPT_NODE" && -n "${k8s_node:-}" ]] && _node_from_conf=true
-
-if [[ -n "$_eff_node" ]]; then
+# --node pins to a specific node (nodeName); takes priority over --label.
+# --label sets a nodeSelector; defaults to birentech.com=gpu when omitted.
+# The default GPU label ensures pods land on GPU nodes without manual --label.
+_DEFAULT_LABEL=false
+if [[ -n "$OPT_NODE" ]]; then
     SCHED_TYPE="node"
-    if $_node_from_conf; then
-        _info "Scheduling  : nodeName=${_eff_node}  (default from conf k8s_node)"
-    else
-        _info "Scheduling  : nodeName=${_eff_node}"
-    fi
+    _info "Scheduling  : nodeName=${OPT_NODE}"
 elif [[ -n "$OPT_LABEL" ]]; then
     SCHED_TYPE="label"
     LABEL_KEY="${OPT_LABEL%%=*}"
     LABEL_VAL="${OPT_LABEL#*=}"
     _info "Scheduling  : nodeSelector ${LABEL_KEY}=${LABEL_VAL}"
 else
-    SCHED_TYPE="none"
-    # Validate cluster has at least one node with sufficient GPU capacity
-    _avail=$(kubectl get nodes \
+    SCHED_TYPE="label"
+    LABEL_KEY="birentech.com"
+    LABEL_VAL="gpu"
+    _DEFAULT_LABEL=true
+    _avail=$(kubectl get nodes -l birentech.com=gpu \
         -o jsonpath='{range .items[*]}{.status.allocatable.birentech\.com/gpu}{"\n"}{end}' \
         2>/dev/null | awk -v need="$gpu_needed" 'BEGIN{ok=0} $1+0>=need{ok=1} END{print ok}' || echo 0)
-    if [[ "$_avail" != "1" ]]; then
-        _warn "No single node with >= $gpu_needed birentech.com/gpu found; k8s scheduler will decide."
-    fi
-    _info "Scheduling  : (none — k8s scheduler decides)"
+    [[ "$_avail" != "1" ]] && \
+        _warn "No GPU node with >= $gpu_needed birentech.com/gpu found; pod will stay Pending."
+    _info "Scheduling  : nodeSelector birentech.com=gpu (default)"
 fi
 
 # ── Scheduling YAML snippets ──────────────────────────────────────────────────
 # deploy template.spec uses 6-space indent; pod spec uses 2-space indent
 if [[ "$SCHED_TYPE" == "node" ]]; then
-    _sched_deploy="      nodeName: ${_eff_node}"
-    _sched_pod="  nodeName: ${_eff_node}"
+    _sched_deploy="      nodeName: ${OPT_NODE}"
+    _sched_pod="  nodeName: ${OPT_NODE}"
 elif [[ "$SCHED_TYPE" == "label" ]]; then
     _sched_deploy="      nodeSelector:
         ${LABEL_KEY}: ${LABEL_VAL}"
@@ -265,12 +257,12 @@ else
 fi
 
 # ── Build output filename ─────────────────────────────────────────────────────
-# k8s_node from conf is the default — no suffix, keeping the canonical filename.
-# Explicit CLI --node adds a suffix so the user can keep both YAMLs side-by-side.
+# Default GPU label produces no suffix (canonical filename).
+# Explicit --node or --label adds a suffix to distinguish the file.
 _sched_suffix=""
-if [[ "$SCHED_TYPE" == "node" && -n "$OPT_NODE" ]]; then
+if [[ "$SCHED_TYPE" == "node" ]]; then
     _sched_suffix="-node-${OPT_NODE//./-}"
-elif [[ "$SCHED_TYPE" == "label" ]]; then
+elif [[ "$SCHED_TYPE" == "label" ]] && ! $_DEFAULT_LABEL; then
     # Use just the value part, sanitized
     _safe_val="${LABEL_VAL//[^a-zA-Z0-9_-]/-}"
     _sched_suffix="-label-${_safe_val}"

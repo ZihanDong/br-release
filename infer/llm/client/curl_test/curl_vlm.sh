@@ -34,11 +34,11 @@ DATA_URL="data:${MIME};base64,${B64}"
 
 URL="http://${HOST}:${PORT}/v1/chat/completions"
 
-echo "→ POST ${URL}"
-echo "  model=${MODEL}  max_tokens=${MAX_TOKENS}"
-echo "  image=${IMAGE_FILE}  ($(wc -c < "$IMAGE_FILE") bytes)"
-echo "  prompt: ${PROMPT}"
-echo ""
+echo "→ POST ${URL}" >&2
+echo "  model=${MODEL}  max_tokens=${MAX_TOKENS}" >&2
+echo "  image=${IMAGE_FILE}  ($(wc -c < "$IMAGE_FILE") bytes)" >&2
+echo "  prompt: ${PROMPT}" >&2
+echo "" >&2
 
 curl -s --noproxy "*" --max-time 180 "${URL}" \
   -H 'Content-Type: application/json' \
