@@ -362,9 +362,10 @@ spec:
         app: ${APP_LABEL}
         model: ${model_weights}
     spec:
-      # RuntimeClass 'biren': GPU devices allocated by birentech.com/gpu device plugin.
-      # Device plugin mounts /dev/biren/card_N via CDI; brml auto-discovers from /dev/biren/.
-      # BIREN_VISIBLE_DEVICES is NOT injected; no privileged mode needed.
+      # RuntimeClass 'biren' (handler: biren) uses biren-container-runtime (BirenTech Container
+      # Toolkit), which injects /dev/biren-m and the allocated /dev/biren/card_N devices.
+      # birentech.com/gpu device plugin selects which cards are allocated per pod.
+      # No privileged mode or hardcoded BIREN_VISIBLE_DEVICES needed.
       runtimeClassName: biren
 ${_sched_deploy}
       containers:

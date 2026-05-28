@@ -353,6 +353,10 @@ spec:
         app: ${APP_LABEL}
         model: ${model_weights}
     spec:
+      # RuntimeClass 'biren' (handler: biren) uses biren-container-runtime (BirenTech Container
+      # Toolkit), which injects /dev/biren-m and the allocated /dev/biren/card_N devices.
+      # birentech.com/gpu device plugin selects which cards are allocated per pod.
+      # No privileged mode or hardcoded BIREN_VISIBLE_DEVICES needed.
       runtimeClassName: biren
 ${_sched_deploy}
       containers:
@@ -503,6 +507,10 @@ metadata:
     app: ${APP_LABEL}
     model: ${model_weights}
 spec:
+  # RuntimeClass 'biren' (handler: biren) uses biren-container-runtime (BirenTech Container
+  # Toolkit), which injects /dev/biren-m and the allocated /dev/biren/card_N devices.
+  # birentech.com/gpu device plugin selects which cards are allocated per pod.
+  # No privileged mode or hardcoded BIREN_VISIBLE_DEVICES needed.
   runtimeClassName: biren
 ${_sched_pod}
   restartPolicy: Never
