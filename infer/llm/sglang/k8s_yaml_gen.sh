@@ -151,6 +151,7 @@ trust_remote_code=false
 extra_env=""
 extra_sglang_args=""
 k8s_nodeport=""
+k8s_node=""
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
@@ -211,9 +212,21 @@ _info "Resources   : cpu req=${OPT_CPU} lim=${cpu_lim}  mem=${mem_gi}Gi (${OPT_M
 [[ "$K8S_TYPE" == "deploy" ]] && _info "Replicas    : ${OPT_REPLICAS}"
 
 # ── Resolve node scheduling ───────────────────────────────────────────────────
-if [[ -n "$OPT_NODE" ]]; then
+# Priority: CLI --node > CLI --label > k8s_node from conf > no constraint.
+# k8s_node in conf records which node has the weights; --node on CLI overrides it.
+# When k8s_node supplies the constraint the output filename keeps no -node-X suffix
+# so the canonical YAML name stays clean (e.g. qwen3-vl-32b-pod-p28800.yaml).
+_eff_node="${OPT_NODE:-${k8s_node:-}}"
+_node_from_conf=false
+[[ -z "$OPT_NODE" && -n "${k8s_node:-}" ]] && _node_from_conf=true
+
+if [[ -n "$_eff_node" ]]; then
     SCHED_TYPE="node"
-    _info "Scheduling  : nodeName=${OPT_NODE}"
+    if $_node_from_conf; then
+        _info "Scheduling  : nodeName=${_eff_node}  (default from conf k8s_node)"
+    else
+        _info "Scheduling  : nodeName=${_eff_node}"
+    fi
 elif [[ -n "$OPT_LABEL" ]]; then
     SCHED_TYPE="label"
     LABEL_KEY="${OPT_LABEL%%=*}"
@@ -232,8 +245,8 @@ fi
 
 # ── Scheduling YAML snippets ──────────────────────────────────────────────────
 if [[ "$SCHED_TYPE" == "node" ]]; then
-    _sched_deploy="      nodeName: ${OPT_NODE}"
-    _sched_pod="  nodeName: ${OPT_NODE}"
+    _sched_deploy="      nodeName: ${_eff_node}"
+    _sched_pod="  nodeName: ${_eff_node}"
 elif [[ "$SCHED_TYPE" == "label" ]]; then
     _sched_deploy="      nodeSelector:
         ${LABEL_KEY}: ${LABEL_VAL}"
@@ -245,8 +258,10 @@ else
 fi
 
 # ── Build output filename ─────────────────────────────────────────────────────
+# k8s_node from conf is the default — no suffix, keeping the canonical filename.
+# Explicit CLI --node adds a suffix so the user can keep both YAMLs side-by-side.
 _sched_suffix=""
-if [[ "$SCHED_TYPE" == "node" ]]; then
+if [[ "$SCHED_TYPE" == "node" && -n "$OPT_NODE" ]]; then
     _sched_suffix="-node-${OPT_NODE//./-}"
 elif [[ "$SCHED_TYPE" == "label" ]]; then
     _safe_val="${LABEL_VAL//[^a-zA-Z0-9_-]/-}"
