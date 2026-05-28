@@ -145,6 +145,28 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export VLLM_BR_WEIGHT_TYPE=NUMA
 export BRTB_LOG_LEVEL=Warning
 export BRTB_LOG_DIR=/root/vllm_logs
+
+# Required for PD disaggregated serving (from Biren official examples)
+export SUCCL_BUFFSIZE=16777216
+export BR_UMD_DEBUG_P2P_ACCESS_CHECK=0
+export VLLM_BR_ENABLE_GRAPH_MODE=0
+export BRTB_PLAN_ID_RENEW=1
+export BRTB_DISABLE_ZERO_REORDER=1
+export BRTB_DISABLE_ZERO_OUTPUT_NUMA=1
+export BRTB_DISABLE_ZERO_OUTPUT_UMA=1
+export BRTB_DISABLE_ZERO_WS=1
+export BRTB_DISABLE_L2_FLUSH=1
+export BRTB_ENABLE_FORCE_UMA=1
+export BRTB_ENABLE_SUPA_FILL=1
+export BRTB_ENABLE_SUBLAS_API=1
+export BRTB_ENABLE_REGISTER_BEFORE_D2H=1
+export BRTB_ENABLE_MMA_BF16_ACC=1
+export BRTB_LEGACY_PROFILER_STACK=1
+export BRTB_ENABLE_NUMA_SPLIT=1
+export BRTB_ENABLE_NUMA_ALIGN_4K=1
+export VLLM_ENGINE_ITERATION_TIMEOUT_S=3000
+export VLLM_RPC_TIMEOUT=1800000
+
 [[ -n "${succl_socket_ifname:-}" ]] && export SUCCL_SOCKET_IFNAME="${succl_socket_ifname}"
 
 if [[ -n "${extra_env:-}" ]]; then
@@ -155,6 +177,15 @@ fi
 
 ulimit -n 65535 2>/dev/null || true
 mkdir -p /root/vllm_logs 2>/dev/null || true
+
+# Use SUCCL 1.9.0 from host SDK if available (newer than container's 1.8.0,
+# fixes a native crash on the kv_consumer side after succlCommInitRank).
+_succl_1_9="/data/tools/succl_1.9/libsuccl.so"
+if [[ -f "$_succl_1_9" ]]; then
+    export VLLM_SCCL_SO_PATH="$_succl_1_9"
+    _info "SUCCL lib   : ${_succl_1_9} (1.9.0)"
+fi
+unset _succl_1_9
 
 # vllm_br looks for SUCCL at /usr/local/birensupa/base/latest/succl/...
 # Create the symlink if the SDK dir exists but the base/latest alias is missing.
