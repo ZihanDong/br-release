@@ -156,6 +156,17 @@ fi
 ulimit -n 65535 2>/dev/null || true
 mkdir -p /root/vllm_logs 2>/dev/null || true
 
+# vllm_br looks for SUCCL at /usr/local/birensupa/base/latest/succl/...
+# Create the symlink if the SDK dir exists but the base/latest alias is missing.
+if [[ ! -e /usr/local/birensupa/base/latest ]]; then
+    _sdk_dir=$(find /usr/local/birensupa/sdk -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V | tail -1)
+    if [[ -n "$_sdk_dir" ]]; then
+        mkdir -p /usr/local/birensupa/base
+        ln -sfT "$_sdk_dir" /usr/local/birensupa/base/latest
+        _info "SUCCL symlink : /usr/local/birensupa/base/latest → $_sdk_dir"
+    fi
+fi
+
 # ── Build --kv-transfer-config JSON ──────────────────────────────────────────
 kv_port=$(( RANDOM % 1001 + 4000 ))
 _info "KV port     : ${kv_port}  (random, for SUCCL handshake)"
