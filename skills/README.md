@@ -8,6 +8,7 @@ This directory contains skill files for use by Claude Code agents. Each skill is
 |-------|------|-------------|
 | `k8s` | [k8s.md](k8s.md) | All k8s operations: cluster setup, node modes, private registry, cleanup |
 | `vllm` | [vllm.md](vllm.md) | Launch vLLM inference servers (Docker + k8s) on BirenTech GPU nodes; scripts: vllm_server.sh + run_docker.sh + k8s_yaml_gen.sh + k8s_apply.sh |
+| `sglang` | [sglang.md](sglang.md) | Launch SGLang inference servers (Docker + k8s) on BirenTech GPU nodes; supports VL multimodal models; scripts: sglang_server.sh + run_docker.sh + k8s_yaml_gen.sh + k8s_apply.sh |
 | `vllm-script-to-conf` | [vllm-script-to-conf.md](vllm-script-to-conf.md) | Convert raw vLLM launch scripts (start_<model>.sh) into structured conf files under configs/ |
 
 ## How to Use in an Agent
@@ -40,3 +41,11 @@ The skill file provides:
 | `infer/llm/vllm/k8s_yaml_gen.sh` | k8s YAML generator (saves to k8s_yaml_gen/, no apply) |
 | `infer/llm/vllm/k8s_apply.sh` | k8s deploy + test (kubectl apply + wait Ready/Running + API smoke test or interactive shell) |
 | `infer/llm/vllm/README.md` | Full Chinese vLLM documentation |
+| `infer/llm/sglang/` | SGLang server scripts root |
+| `infer/llm/sglang/configs/` | Per-model SGLang run configs |
+| `infer/llm/sglang/sglang_server.sh` | Inner container script (runs inside container, execs SGLang) |
+| `infer/llm/sglang/run_docker.sh` | Outer Docker launcher for SGLang (GPU select + docker run) |
+| `infer/llm/sglang/k8s_yaml_gen.sh` | k8s YAML generator for SGLang (saves to k8s_yaml_gen/, no apply) |
+| `infer/llm/sglang/k8s_apply.sh` | k8s deploy + test for SGLang (kubectl apply + wait Ready/Running + API smoke test or interactive shell) |
+| `infer/llm/sglang/README.md` | Full Chinese SGLang documentation |
+| `infer/llm/model_registry.conf` | Shared model registry (local paths + download IDs, used by both vLLM and SGLang) |
