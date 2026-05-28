@@ -2,32 +2,32 @@
 # Launch a BirenTech Docker container for vLLM serving.
 #
 # Usage:
-#   sudo bash run_docker.sh [--run] <config_file>
+#   sudo bash run_docker.sh [--run] <config_file> [proxy_conf]
 #
 #   (default)  Start the container, write a server run script to the log
-#              directory, then enter an interactive shell there.  The user
-#              starts the server manually:  bash run_vllm_<model>_server.sh
+#              directory, then enter an interactive shell there.
 #
 #   --run      Write the run script, then exec the server directly (no
-#              interactive shell).  Polls /health and prints test commands
-#              once the server is ready.
+#              interactive shell).
 #
-# config_file may be:
-#   - a bare model name: bge-m3  (resolved to configs/bge-m3.conf)
-#   - a relative path:   configs/bge-m3.conf
-#   - an absolute path:  /path/to/any.conf
+# Config file types (detected by suffix):
+#   *.conf          → normal vLLM server via vllm_server.sh
+#   *.p.conf        → PD Prefill node via vllm_server_pd.sh (requires proxy_conf)
+#   *.d.conf        → PD Decode node via vllm_server_pd.sh (requires proxy_conf)
+#   *.proxy.conf    → Proxy server only via proxy_server.sh (no GPU needed)
 #
-# /home and /data are bind-mounted so vllm_server.sh, model weights, and
-# configs are accessible at the same paths inside the container.
+# For *.p.conf / *.d.conf, pass the proxy conf as the second positional arg:
+#   sudo bash run_docker.sh --run configs/minimax-m2.5.p.conf proxy_conf/minimax-m2.5.proxy.conf
+#
+# Health check: use tests/test_healthcheck.sh after the server is up.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-_REGISTRY_SH="${SCRIPT_DIR}/../model_registry.sh"
 LOG_DIR="${SCRIPT_DIR}/logs"
-CONTAINER_IMAGE='birensupa-smartinfer-vllm:26.05.14-py310-pt2.8.0-br1xx'
+CONTAINER_IMAGE='birensupa-smartinfer-vllm:26.05.28-py310-pt2.8.0-c059s001t003b24145-br1xx'
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
@@ -47,14 +47,25 @@ fi
 
 usage() {
     echo ""
-    echo "Usage: $0 [--run] <config_file>"
+    echo "Usage: $0 [--run] <config_file> [proxy_conf]"
     echo ""
     echo "  (default)  Enter interactive shell; start server manually inside"
-    echo "  --run      Write run script then exec server directly (no interactive shell)"
+    echo "  --run      Write run script then exec server directly"
+    echo ""
+    echo "Config types:"
+    echo "  *.conf         — normal vLLM server"
+    echo "  *.p.conf       — PD Prefill node (requires proxy_conf)"
+    echo "  *.d.conf       — PD Decode node (requires proxy_conf)"
+    echo "  *.proxy.conf   — Proxy server only (no GPU)"
     echo ""
     echo "Available configs:"
     for f in "${SCRIPT_DIR}/configs/"*.conf; do
-        [[ -f "$f" ]] && echo "  $(basename "$f" .conf)"
+        [[ -f "$f" ]] && echo "  $(basename "$f")"
+    done
+    echo ""
+    echo "Available proxy confs:"
+    for f in "${SCRIPT_DIR}/proxy_conf/"*.proxy.conf; do
+        [[ -f "$f" ]] && echo "  proxy_conf/$(basename "$f")"
     done
     echo ""
     exit 1
@@ -63,37 +74,155 @@ usage() {
 # ── Parse arguments ────────────────────────────────────────────────────────────
 RUN_MODE=false
 CONFIG_ARG=""
+PROXY_CONF_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --run) RUN_MODE=true; shift ;;
         -*)    _err "Unknown option: $1"; usage ;;
-        *)     CONFIG_ARG="$1"; shift ;;
+        *)
+            if [[ -z "$CONFIG_ARG" ]]; then
+                CONFIG_ARG="$1"
+            elif [[ -z "$PROXY_CONF_ARG" ]]; then
+                PROXY_CONF_ARG="$1"
+            else
+                _err "Unexpected argument: $1"; usage
+            fi
+            shift ;;
     esac
 done
 
 [[ -z "$CONFIG_ARG" ]] && { _err "A config file is required."; usage; }
 
-# ── Resolve config ─────────────────────────────────────────────────────────────
-CONFIG_FILE=""
-
-if [[ "$CONFIG_ARG" == /* ]]; then
-    CONFIG_FILE="$CONFIG_ARG"
-elif [[ -f "${SCRIPT_DIR}/configs/${CONFIG_ARG}.conf" ]]; then
-    CONFIG_FILE="${SCRIPT_DIR}/configs/${CONFIG_ARG}.conf"
-elif [[ -f "${SCRIPT_DIR}/${CONFIG_ARG}" ]]; then
-    CONFIG_FILE="${SCRIPT_DIR}/${CONFIG_ARG}"
-elif [[ -f "${CONFIG_ARG}" ]]; then
-    CONFIG_FILE="${CONFIG_ARG}"
+# ── Detect config type from suffix ────────────────────────────────────────────
+CONFIG_BASENAME="$(basename "$CONFIG_ARG")"
+if [[ "$CONFIG_BASENAME" == *.proxy.conf ]]; then
+    MODE="proxy"
+elif [[ "$CONFIG_BASENAME" == *.p.conf ]]; then
+    MODE="pd"
+elif [[ "$CONFIG_BASENAME" == *.d.conf ]]; then
+    MODE="pd"
+else
+    MODE="normal"
 fi
 
+_info "Mode        : $MODE"
+
+# ── Helper: resolve config path ────────────────────────────────────────────────
+resolve_config() {
+    local arg="$1" search_dirs=("${@:2}")
+    local file=""
+    if [[ "$arg" == /* ]]; then
+        file="$arg"
+    else
+        for dir in "${search_dirs[@]}"; do
+            [[ -f "${dir}/${arg}" ]] && { file="${dir}/${arg}"; break; }
+        done
+        [[ -z "$file" && -f "${SCRIPT_DIR}/${arg}" ]] && file="${SCRIPT_DIR}/${arg}"
+        [[ -z "$file" && -f "$arg" ]] && file="$arg"
+    fi
+    echo "$file"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROXY MODE — no GPU, just run proxy_server.sh
+# ══════════════════════════════════════════════════════════════════════════════
+if [[ "$MODE" == "proxy" ]]; then
+
+    PROXY_FILE="$(resolve_config "$CONFIG_ARG" \
+        "${SCRIPT_DIR}/proxy_conf" "${SCRIPT_DIR}/configs")"
+    [[ -z "$PROXY_FILE" || ! -f "$PROXY_FILE" ]] && {
+        _err "Proxy conf not found: $CONFIG_ARG"; usage; }
+
+    proxy_host="0.0.0.0"; proxy_port=35111; proxy_zmq_port=34367
+    # shellcheck source=/dev/null
+    source "$PROXY_FILE"
+
+    MODEL_NAME="$(basename "$PROXY_FILE" .proxy.conf)"
+    CONTAINER_NAME="proxy_${MODEL_NAME}"
+
+    [[ -n "${docker_image:-}" ]] && CONTAINER_IMAGE="$docker_image"
+
+    _info "Proxy conf  : $(basename "$PROXY_FILE")"
+    _info "HTTP        : ${proxy_host}:${proxy_port}  ZMQ=:${proxy_zmq_port}"
+    _info "Container   : $CONTAINER_NAME"
+    echo ""
+
+    $DOCKER_CMD image inspect "$CONTAINER_IMAGE" &>/dev/null || {
+        _err "Docker image not found: $CONTAINER_IMAGE"; exit 1; }
+
+    if $DOCKER_CMD inspect "$CONTAINER_NAME" &>/dev/null; then
+        _warn "Removing existing container: $CONTAINER_NAME"
+        $DOCKER_CMD rm -f "$CONTAINER_NAME" >/dev/null
+    fi
+
+    mkdir -p "$LOG_DIR"
+    $DOCKER_CMD run -d \
+        --name "$CONTAINER_NAME" \
+        --ulimit nofile=1048576 \
+        -v /home:/home \
+        -v /data:/data \
+        --net host \
+        "$CONTAINER_IMAGE" \
+        sleep infinity >/dev/null
+
+    _ok "Container started."
+
+    INNER_SCRIPT="${SCRIPT_DIR}/proxy_server.sh"
+    RUN_SCRIPT_NAME="run_proxy_${MODEL_NAME}.sh"
+    RUN_SCRIPT_PATH="${LOG_DIR}/${RUN_SCRIPT_NAME}"
+
+    cat > "${RUN_SCRIPT_PATH}" <<'RUNSCRIPT'
+#!/usr/bin/env bash
+_ld=$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^LD_LIBRARY_PATH=//p' | head -1)
+[[ -n "$_ld" ]] && export LD_LIBRARY_PATH="$_ld"
+unset _ld
+exec bash "__INNER_SCRIPT__" "__PROXY_FILE__"
+RUNSCRIPT
+    sed -i "s|__INNER_SCRIPT__|${INNER_SCRIPT}|g; s|__PROXY_FILE__|${PROXY_FILE}|g" \
+        "${RUN_SCRIPT_PATH}"
+    chmod +x "${RUN_SCRIPT_PATH}"
+    _ok "Run script  : ${RUN_SCRIPT_PATH}"
+    echo ""
+
+    if $RUN_MODE; then
+        LOG_FILE="${LOG_DIR}/proxy_${MODEL_NAME}.log"
+        _info "Starting proxy server (logs → ${LOG_FILE})..."
+        $DOCKER_CMD exec -d "$CONTAINER_NAME" \
+            bash -c "bash '${RUN_SCRIPT_PATH}' > '${LOG_FILE}' 2>&1"
+        _ok "Proxy server launched."
+        echo "  tail -f ${LOG_FILE}"
+        echo "  ${DOCKER_CMD} stop ${CONTAINER_NAME}"
+    else
+        _env_tmp=$(mktemp /tmp/vllm_docker_env_XXXXXX.sh)
+        cat > "$_env_tmp" <<ENVSCRIPT
+_ld=\$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^LD_LIBRARY_PATH=//p' | head -1)
+[[ -n "\$_ld" ]] && export LD_LIBRARY_PATH="\$_ld"
+unset _ld
+cd '${LOG_DIR}'
+echo ""
+echo "  Docker shell — Proxy server"
+echo "  Start server with:  bash ${RUN_SCRIPT_NAME}"
+echo ""
+ENVSCRIPT
+        $DOCKER_CMD exec -i "$CONTAINER_NAME" tee /tmp/.biren_env.sh < "$_env_tmp" >/dev/null
+        rm -f "$_env_tmp"
+        _info "Entering interactive shell..."
+        $DOCKER_CMD exec -it "$CONTAINER_NAME" bash -c "source /tmp/.biren_env.sh && exec bash -i"
+    fi
+    exit 0
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NORMAL / PD MODE — common config loading and GPU selection
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Resolve main config ────────────────────────────────────────────────────────
+CONFIG_FILE="$(resolve_config "$CONFIG_ARG" "${SCRIPT_DIR}/configs")"
 [[ -z "$CONFIG_FILE" || ! -f "$CONFIG_FILE" ]] && {
     _err "Config not found: $CONFIG_ARG"; usage; }
 
-# ── Load config ────────────────────────────────────────────────────────────────
-# Required params have NO defaults and MUST be set in the config file:
-#   model_weights, port, tensor_parallel_size, pipeline_parallel_size,
-#   max_model_len, max_num_seqs
+# ── Load config with defaults ─────────────────────────────────────────────────
 served_model_name=""
 task=""
 dtype="auto"
@@ -105,13 +234,18 @@ compilation_config=""
 docker_image=""
 extra_env=""
 extra_vllm_args=""
+# PD-mode extras
+dp_size=1
+http_ip="0.0.0.0"
+max_num_batched_tokens=""
+succl_socket_ifname=""
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
 
-# Allow per-model image override via docker_image in conf
 [[ -n "${docker_image:-}" ]] && CONTAINER_IMAGE="$docker_image"
 
+# ── Validate required params ──────────────────────────────────────────────────
 _missing=()
 [[ -z "${model_weights:-}" ]]         && _missing+=(model_weights)
 [[ -z "${port:-}" ]]                   && _missing+=(port)
@@ -119,44 +253,28 @@ _missing=()
 [[ -z "${pipeline_parallel_size:-}" ]] && _missing+=(pipeline_parallel_size)
 [[ -z "${max_model_len:-}" ]]          && _missing+=(max_model_len)
 [[ -z "${max_num_seqs:-}" ]]           && _missing+=(max_num_seqs)
+if [[ "$MODE" == "pd" ]]; then
+    [[ -z "${max_num_batched_tokens:-}" ]] && _missing+=(max_num_batched_tokens)
+fi
 [[ ${#_missing[@]} -gt 0 ]] && {
     _err "Required params not set in $(basename "$CONFIG_FILE"): ${_missing[*]}"; exit 1; }
 
+# ── PD mode: resolve proxy conf ───────────────────────────────────────────────
+PROXY_FILE=""
+if [[ "$MODE" == "pd" ]]; then
+    [[ -z "$PROXY_CONF_ARG" ]] && {
+        _err "PD mode requires a proxy conf file as the second argument."
+        _err "Example: $0 --run configs/minimax-m2.5.p.conf proxy_conf/minimax-m2.5.proxy.conf"
+        exit 1; }
+    PROXY_FILE="$(resolve_config "$PROXY_CONF_ARG" \
+        "${SCRIPT_DIR}/proxy_conf" "${SCRIPT_DIR}/configs")"
+    [[ -z "$PROXY_FILE" || ! -f "$PROXY_FILE" ]] && {
+        _err "Proxy conf not found: $PROXY_CONF_ARG"; exit 1; }
+fi
+
 _info "Config      : $(basename "$CONFIG_FILE")  [mode=$( $RUN_MODE && echo --run || echo interactive)]"
 _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
-
-# ── Registry lookup (via model_registry.sh) ───────────────────────────────────
-[[ ! -f "$_REGISTRY_SH" ]] && { _err "model_registry.sh not found: $_REGISTRY_SH"; exit 1; }
-# shellcheck source=../model_registry.sh
-source "$_REGISTRY_SH"
-parse_model "$model_weights" || exit 1
-
-_info "Registry    : path=$MODEL_PATH  download=$DOWNLOAD_NAME  status=$DIR_STATUS"
-
-# ── Weight check / download (on host, before starting container) ───────────────
-WEIGHTS_PATH=""
-if [[ "$DIR_STATUS" == "ok" ]]; then
-    WEIGHTS_PATH="$MODEL_PATH"
-    _ok "Weights     : $WEIGHTS_PATH"
-else
-    _warn "Local weights not found (${MODEL_PATH:-(path not configured)}, status: $DIR_STATUS)"
-    read -rp "  Download now? [y/N]: " yn
-    if [[ ! "$yn" =~ ^[Yy]$ ]]; then
-        _err "Cannot start without model weights. Exiting."; exit 1
-    fi
-    echo "  Download source:"
-    echo "    1) modelscope  —  modelscope download --model $DOWNLOAD_NAME --local_dir $MODEL_PATH"
-    echo "    2) huggingface —  huggingface-cli download $DOWNLOAD_NAME --local-dir $MODEL_PATH"
-    read -rp "  Choose [1/2]: " src
-    mkdir -p "$MODEL_PATH"
-    case "$src" in
-        1) modelscope download --model "$DOWNLOAD_NAME" --local_dir "$MODEL_PATH" ;;
-        2) huggingface-cli download "$DOWNLOAD_NAME" --local-dir "$MODEL_PATH" ;;
-        *) _err "Invalid choice."; exit 1 ;;
-    esac
-    WEIGHTS_PATH="$MODEL_PATH"
-    _ok "Downloaded  : $WEIGHTS_PATH"
-fi
+[[ -n "$PROXY_FILE" ]] && _info "Proxy conf  : $(basename "$PROXY_FILE")"
 
 # ── GPU selection ──────────────────────────────────────────────────────────────
 gpu_needed=$((tensor_parallel_size * pipeline_parallel_size))
@@ -187,9 +305,7 @@ done
 # ── Container setup ────────────────────────────────────────────────────────────
 mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-LOG_FILE="${LOG_DIR}/vllm_${model_weights}_${TIMESTAMP}.log"
 CONTAINER_NAME="vllm_${model_weights}"
-INNER_SCRIPT="${SCRIPT_DIR}/vllm_server.sh"
 
 if $DOCKER_CMD inspect "$CONTAINER_NAME" &>/dev/null; then
     _warn "Removing existing container: $CONTAINER_NAME"
@@ -201,14 +317,7 @@ _info "Log dir     : $LOG_DIR"
 echo ""
 
 $DOCKER_CMD image inspect "$CONTAINER_IMAGE" &>/dev/null || {
-    _err "Docker image not found: $CONTAINER_IMAGE"
-    _err "Pull or build the image first."; exit 1; }
-
-# ── Start container (sleep infinity — server started separately below) ─────────
-# /home is bind-mounted so SCRIPT_DIR, CONFIG_FILE, and LOG_DIR are accessible
-# inside the container at the same paths.
-# The image ENTRYPOINT (biren_entrypoint.sh) runs first to set LD_LIBRARY_PATH,
-# then exec's sleep — making LD_LIBRARY_PATH available via /proc/1/environ.
+    _err "Docker image not found: $CONTAINER_IMAGE"; exit 1; }
 
 # shellcheck disable=SC2086
 $DOCKER_CMD run -d \
@@ -228,91 +337,85 @@ $DOCKER_CMD run -d \
 _ok "Container started."
 echo ""
 
-# ── Write server run script into LOG_DIR ──────────────────────────────────────
-# LOG_DIR is on /home which is bind-mounted, so writing here on the host
-# makes the file immediately visible inside the container at the same path.
-# The script reads LD_LIBRARY_PATH from PID 1 (/proc/1/environ) to bridge
-# the gap: docker exec sessions don't inherit runtime env set by the ENTRYPOINT.
-
-RUN_SCRIPT_NAME="run_vllm_${model_weights}_server.sh"
+# ── Write server run script ───────────────────────────────────────────────────
+if [[ "$MODE" == "pd" ]]; then
+    INNER_SCRIPT="${SCRIPT_DIR}/vllm_server_pd.sh"
+    RUN_SCRIPT_NAME="run_vllm_${model_weights}_$(basename "$CONFIG_FILE" .conf)_server.sh"
+else
+    INNER_SCRIPT="${SCRIPT_DIR}/vllm_server.sh"
+    RUN_SCRIPT_NAME="run_vllm_${model_weights}_server.sh"
+fi
 RUN_SCRIPT_PATH="${LOG_DIR}/${RUN_SCRIPT_NAME}"
 
-cat > "${RUN_SCRIPT_PATH}" <<'RUNSCRIPT'
+if [[ "$MODE" == "pd" ]]; then
+    cat > "${RUN_SCRIPT_PATH}" <<'RUNSCRIPT'
+#!/usr/bin/env bash
+_ld=$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^LD_LIBRARY_PATH=//p' | head -1)
+[[ -n "$_ld" ]] && export LD_LIBRARY_PATH="$_ld"
+unset _ld
+exec bash "__INNER_SCRIPT__" "__CONFIG_FILE__" "__PROXY_FILE__"
+RUNSCRIPT
+    sed -i "s|__INNER_SCRIPT__|${INNER_SCRIPT}|g; \
+            s|__CONFIG_FILE__|${CONFIG_FILE}|g; \
+            s|__PROXY_FILE__|${PROXY_FILE}|g" "${RUN_SCRIPT_PATH}"
+else
+    cat > "${RUN_SCRIPT_PATH}" <<'RUNSCRIPT'
 #!/usr/bin/env bash
 _ld=$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^LD_LIBRARY_PATH=//p' | head -1)
 [[ -n "$_ld" ]] && export LD_LIBRARY_PATH="$_ld"
 unset _ld
 exec bash "__INNER_SCRIPT__" "__CONFIG_FILE__"
 RUNSCRIPT
-sed -i "s|__INNER_SCRIPT__|${INNER_SCRIPT}|g; s|__CONFIG_FILE__|${CONFIG_FILE}|g" "${RUN_SCRIPT_PATH}"
+    sed -i "s|__INNER_SCRIPT__|${INNER_SCRIPT}|g; \
+            s|__CONFIG_FILE__|${CONFIG_FILE}|g" "${RUN_SCRIPT_PATH}"
+fi
 chmod +x "${RUN_SCRIPT_PATH}"
 
 _ok "Run script  : ${RUN_SCRIPT_PATH}"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════════════
-# --run mode: exec server directly, poll /health, print test commands
+# --run mode: exec server directly
 # ══════════════════════════════════════════════════════════════════════════════
 if $RUN_MODE; then
 
+    LOG_FILE="${LOG_DIR}/vllm_${model_weights}_${TIMESTAMP}.log"
     _info "Starting vLLM server (logs → ${LOG_FILE})..."
     $DOCKER_CMD exec -d "$CONTAINER_NAME" \
         bash -c "bash '${RUN_SCRIPT_PATH}' > '${LOG_FILE}' 2>&1"
 
     _ok "Server process launched inside container."
-    echo "  (tail -f ${LOG_FILE})"
+    echo "  tail -f ${LOG_FILE}"
     echo ""
 
-    READY=false
-    for _ in $(seq 1 120); do
-        if curl -sf "http://127.0.0.1:${port}/health" &>/dev/null; then
-            READY=true; break
-        fi
-        printf "."
-        sleep 5
-    done
-    echo ""
-
-    MODEL_API="${served_model_name:-${WEIGHTS_PATH}}"
-
-    if $READY; then
-        _ok "═══════════════════════════════════════════════════"
-        _ok " vLLM server ready — ${CONTAINER_NAME}  :${port}"
-        _ok "═══════════════════════════════════════════════════"
-    else
-        _warn "Server did not respond within 600 s. It may still be loading."
-        _warn "Check: tail -f ${LOG_FILE}"
-    fi
-
+    MODEL_API="${served_model_name:-${model_weights}}"
+    echo "── Test commands (run after server is ready) ─────────────────"
+    echo "  bash ${SCRIPT_DIR}/tests/test_healthcheck.sh ${port}"
     echo ""
     if [[ "$task" == "embed" ]]; then
-        echo "── Embedding test ────────────────────────────────────────"
+        echo "── Embedding test ────────────────────────────────────────────"
         echo "curl -s http://127.0.0.1:${port}/v1/embeddings \\"
         echo "  -H 'Content-Type: application/json' \\"
         echo "  -d '{\"model\": \"${MODEL_API}\", \"input\": \"Hello, world!\"}' \\"
         echo "  | python3 -m json.tool"
     else
-        echo "── Chat completion test ───────────────────────────────────"
+        echo "── Chat completion test ──────────────────────────────────────"
         echo "curl -s http://127.0.0.1:${port}/v1/chat/completions \\"
         echo "  -H 'Content-Type: application/json' \\"
         echo "  -d '{\"model\": \"${MODEL_API}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}], \"max_tokens\": 64}' \\"
         echo "  | python3 -m json.tool"
     fi
-
     echo ""
-    echo "── Container management ──────────────────────────────────"
-    echo "  tail -f ${LOG_FILE}"
+    echo "── Container management ──────────────────────────────────────"
     echo "  ${DOCKER_CMD} exec -it ${CONTAINER_NAME} bash"
     echo "  ${DOCKER_CMD} stop ${CONTAINER_NAME}"
     echo "  ${DOCKER_CMD} rm   ${CONTAINER_NAME}"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Default (interactive): enter shell at LOG_DIR, user runs the script manually
+# Default (interactive): enter shell at LOG_DIR
 # ══════════════════════════════════════════════════════════════════════════════
 else
 
-    # Write a small env-setup snippet to /tmp inside the container.
-    # It sources LD_LIBRARY_PATH from PID 1, changes to LOG_DIR, and prints a banner.
     _env_tmp=$(mktemp /tmp/vllm_docker_env_XXXXXX.sh)
     cat > "$_env_tmp" <<ENVSCRIPT
 _ld=\$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^LD_LIBRARY_PATH=//p' | head -1)
@@ -333,7 +436,7 @@ ENVSCRIPT
     echo "  To start the server, run inside the container:"
     echo "    bash ${RUN_SCRIPT_NAME}"
     echo ""
-    echo "── Container management ──────────────────────────────────"
+    echo "── Container management ──────────────────────────────────────"
     echo "  ${DOCKER_CMD} stop ${CONTAINER_NAME}"
     echo "  ${DOCKER_CMD} rm   ${CONTAINER_NAME}"
     echo ""
