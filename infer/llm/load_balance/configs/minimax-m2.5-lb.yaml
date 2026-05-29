@@ -1,0 +1,15 @@
+# Load balancer config for MiniMax-M2.5-INT8
+# Two vLLM servers on 172.25.198.36 and 172.25.198.37, port 20027
+
+backends:
+  - model: "/data/models/MiniMax/MiniMax-M2.5-INT8"
+    ip: "172.25.198.36"
+    port: 20027
+    enabled: true
+    description: "MiniMax-M2.5-INT8 on node-36"
+
+  - model: "/data/models/MiniMax/MiniMax-M2.5-INT8"
+    ip: "172.25.198.37"
+    port: 20027
+    enabled: true
+    description: "MiniMax-M2.5-INT8 on node-37"
