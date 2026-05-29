@@ -71,6 +71,7 @@ served_model_name=""
 api_format=openai
 host=127.0.0.1
 dataset_name=random
+tokenizer=""
 trust_remote_code=false
 ignore_eos=false
 top_p=1
@@ -208,8 +209,9 @@ for tc in "${test_cases[@]}"; do
     bench_args+=" --max-concurrency ${concurrency}"
     bench_args+=" --num-prompts ${num_prompts}"
     bench_args+=" --top-p ${top_p} --top-k ${top_k} --temperature ${temperature}"
-    [[ -n "$tr_flag" ]]  && bench_args+=" ${tr_flag}"
-    [[ -n "$eos_flag" ]] && bench_args+=" ${eos_flag}"
+    [[ -n "$tokenizer" ]]  && bench_args+=" --tokenizer '${tokenizer}'"
+    [[ -n "$tr_flag" ]]    && bench_args+=" ${tr_flag}"
+    [[ -n "$eos_flag" ]]   && bench_args+=" ${eos_flag}"
 
     cat >> "$INNER_SCRIPT" << EOF
 _info "[${IDX}/${TOTAL}] Starting: in=${input_len} out=${output_len} conc=${concurrency} req=${num_prompts}"
@@ -249,6 +251,8 @@ $DOCKER_CMD run --rm \
     -e no_proxy="*" \
     -e http_proxy="" \
     -e https_proxy="" \
+    -e HF_HUB_OFFLINE=1 \
+    -e TRANSFORMERS_OFFLINE=1 \
     "$CONTAINER_IMAGE" \
     bash "$INNER_SCRIPT"
 
