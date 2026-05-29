@@ -1,0 +1,29 @@
+# Test configuration for load balancer
+# mock backends run locally on 127.0.0.1
+
+backends:
+  # test-model-a has 2 enabled backends → requests should alternate between them
+  - model: "test-model-a"
+    ip: "127.0.0.1"
+    port: 18001
+    enabled: true
+    description: "mock backend A-1"
+
+  - model: "test-model-a"
+    ip: "127.0.0.1"
+    port: 18002
+    enabled: true
+    description: "mock backend A-2"
+
+  # test-model-b has 1 enabled + 1 disabled → all go to port 18003
+  - model: "test-model-b"
+    ip: "127.0.0.1"
+    port: 18003
+    enabled: true
+    description: "mock backend B-1"
+
+  - model: "test-model-b"
+    ip: "127.0.0.1"
+    port: 18004
+    enabled: false
+    description: "mock backend B-2 (disabled)"

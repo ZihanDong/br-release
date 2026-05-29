@@ -1,0 +1,35 @@
+# vLLM Load Balancer Backend Configuration
+# Each entry defines one backend vLLM server.
+# The load balancer routes requests to enabled backends in round-robin order
+# grouped by model name.
+
+backends:
+  - model: "qwen3-32b"
+    ip: "10.0.0.1"
+    port: 8000
+    enabled: true
+    description: "qwen3-32b on node-01"
+
+  - model: "qwen3-32b"
+    ip: "10.0.0.2"
+    port: 8000
+    enabled: true
+    description: "qwen3-32b on node-02"
+
+  - model: "qwen3-32b"
+    ip: "10.0.0.3"
+    port: 8000
+    enabled: false
+    description: "qwen3-32b on node-03 (disabled, maintenance)"
+
+  - model: "minimax-m2.5"
+    ip: "10.0.0.4"
+    port: 8000
+    enabled: true
+    description: "minimax-m2.5 on node-04"
+
+  - model: "minimax-m2.5"
+    ip: "10.0.0.5"
+    port: 8000
+    enabled: true
+    description: "minimax-m2.5 on node-05"

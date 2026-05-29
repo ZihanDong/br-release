@@ -1,0 +1,17 @@
+# vLLM Load Balancer Backend Configuration
+# Each entry defines one backend vLLM server.
+# The load balancer routes requests to enabled backends in round-robin order
+# grouped by model name.
+
+backends:
+  - model: "Minimax/Minimax-M2.5"
+    ip: "172.25.198.36"
+    port: 8000
+    enabled: true
+    description: "minimax m2.5 on node-01"
+
+  - model: "Minimax/Minimax-M2.5"
+    ip: "172.25.198.37"
+    port: 8000
+    enabled: true
+    description: "minimax m2.5 on node-02"
