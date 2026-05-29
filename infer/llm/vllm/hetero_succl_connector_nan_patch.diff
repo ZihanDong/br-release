@@ -1,0 +1,10 @@
+--- a/hetero_succl_connector.py
++++ b/hetero_succl_connector.py
+@@ -347,6 +347,7 @@
+         print(f"###!!!, inject_kv_into_layer_new with block_ids shape: {block_ids.shape},block_len_list: {block_len_list}, number of kv_cache blocks: {kv_block_sum}", flush=True)
+         with torch_br.supa.stream(self.copy_stream):
+             block_ids_supa = block_ids.to(layer.device, non_blocking=True)
++            kv_cache = [kv.nan_to_num(nan=0.0) for kv in kv_cache]
+             torch_br.supa_kvcache_pcp_recv(layer, kv_cache, block_ids_supa)
+         
+     def start_load_kv(self, forward_context: "ForwardContext",

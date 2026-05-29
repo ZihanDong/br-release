@@ -339,27 +339,28 @@ _ok "Container started."
 # Apply nan_to_num(0) patch to the D-side KV connector inside the fresh container.
 # Biren GPU profiling warmup leaves NaN in KV block padding slots; those NaN
 # values propagate through attention on the Decode node and corrupt generation.
-# The patch zeroes them out immediately after supa_kvcache_pcp_recv receives the
-# block, before injection into the KV cache.  Idempotent: skips if already present.
+# See: hetero_succl_connector_nan_patch.diff
+_nan_diff="${SCRIPT_DIR}/hetero_succl_connector_nan_patch.diff"
 _connector_py="/usr/local/lib/python3.10/dist-packages/vllm_br/distributed/kv_transfer/kv_connector/v1/p2p/hetero_succl_connector.py"
-$DOCKER_CMD exec "$CONTAINER_NAME" python3 - "$_connector_py" <<'PYPATCH'
-import sys, pathlib
-path = pathlib.Path(sys.argv[1])
-if not path.exists():
-    print("[SKIP]  Connector patch : file not found, skipping")
-    raise SystemExit(0)
-src = path.read_text()
-target = "            torch_br.supa_kvcache_pcp_recv(layer, kv_cache, block_ids_supa)"
-patch  = "            kv_cache = [kv.nan_to_num(nan=0.0) for kv in kv_cache]"
-if target in src and "nan_to_num" not in src:
-    path.write_text(src.replace(target, patch + "\n" + target))
-    pathlib.Path(path.parent / "__pycache__" / (path.stem + ".cpython-310.pyc")).unlink(missing_ok=True)
-    print("[INFO]  Connector patch : nan_to_num(0) applied to hetero_succl_connector.py")
-elif "nan_to_num" in src:
-    print("[INFO]  Connector patch : nan_to_num already present, skipped")
-else:
-    print("[WARN]  Connector patch : target line not found — connector may have changed")
-PYPATCH
+_connector_pyc="/usr/local/lib/python3.10/dist-packages/vllm_br/distributed/kv_transfer/kv_connector/v1/p2p/__pycache__/hetero_succl_connector.cpython-310.pyc"
+if [[ -f "$_nan_diff" ]]; then
+    _patch_result=$($DOCKER_CMD exec "$CONTAINER_NAME" \
+        patch -N "$_connector_py" "$_nan_diff" 2>&1)
+    _patch_rc=$?
+    if [[ $_patch_rc -eq 0 ]]; then
+        $DOCKER_CMD exec "$CONTAINER_NAME" rm -f "$_connector_pyc" 2>/dev/null || true
+        _ok "Connector patch: nan_to_num(0) applied to $(basename "$_connector_py")"
+    elif echo "$_patch_result" | grep -q "Reversed\|already applied"; then
+        $DOCKER_CMD exec "$CONTAINER_NAME" rm -f "${_connector_py}.rej" 2>/dev/null || true
+        _info "Connector patch: already applied, skipped"
+    else
+        $DOCKER_CMD exec "$CONTAINER_NAME" rm -f "${_connector_py}.rej" 2>/dev/null || true
+        _warn "Connector patch: patch returned rc=${_patch_rc}: ${_patch_result}"
+    fi
+else
+    _warn "Connector patch: diff not found at ${_nan_diff}, skipping"
+fi
+unset _nan_diff _connector_py _connector_pyc _patch_result _patch_rc
 echo ""
 
 # ── Write server run script ───────────────────────────────────────────────────
