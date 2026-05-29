@@ -171,6 +171,31 @@ if [[ -n "$_sdk_dir" ]]; then
 fi
 unset _envs_py _sdk_dir _succl_so
 
+# On the Decode (consumer) node, patch the KV connector to replace NaN values
+# in received KV blocks with 0 before injection.  P's send buffer contains NaN
+# in padding slots (beyond the actual token count) left over from GPU profiling;
+# these NaN propagate through attention and corrupt the decode output.
+if [[ "$KV_ROLE" == "kv_consumer" ]]; then
+    _connector="/usr/local/lib/python3.10/dist-packages/vllm_br/distributed/kv_transfer/kv_connector/v1/p2p/hetero_succl_connector.py"
+    if [[ -f "$_connector" ]]; then
+        python3 - "$_connector" <<'PYPATCH'
+import sys, pathlib
+path = pathlib.Path(sys.argv[1])
+src = path.read_text()
+target = "            torch_br.supa_kvcache_pcp_recv(layer, kv_cache, block_ids_supa)"
+patch  = "            kv_cache = [kv.nan_to_num(nan=0.0) for kv in kv_cache]"
+if target in src and "nan_to_num" not in src:
+    path.write_text(src.replace(target, patch + "\n" + target))
+    pathlib.Path(path.parent / "__pycache__" / (path.stem + ".cpython-310.pyc")).unlink(missing_ok=True)
+    print("[INFO]  Connector   : nan_to_num(0) patch applied to D connector")
+elif "nan_to_num" in src:
+    print("[INFO]  Connector   : nan_to_num patch already present")
+else:
+    print("[WARN]  Connector   : patch target not found, skipping")
+PYPATCH
+    fi
+fi
+
 # ── Build --kv-transfer-config JSON ──────────────────────────────────────────
 kv_port=$(( RANDOM % 1001 + 4000 ))
 _info "KV port     : ${kv_port}  (random, for SUCCL handshake)"
