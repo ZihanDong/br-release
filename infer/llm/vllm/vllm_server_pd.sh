@@ -156,16 +156,20 @@ fi
 ulimit -n 65535 2>/dev/null || true
 mkdir -p /root/vllm_logs 2>/dev/null || true
 
-# vllm_br looks for SUCCL at /usr/local/birensupa/base/latest/succl/...
-# Create the symlink if the SDK dir exists but the base/latest alias is missing.
-if [[ ! -e /usr/local/birensupa/base/latest ]]; then
-    _sdk_dir=$(find /usr/local/birensupa/sdk -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V | tail -1)
-    if [[ -n "$_sdk_dir" ]]; then
-        mkdir -p /usr/local/birensupa/base
-        ln -sfT "$_sdk_dir" /usr/local/birensupa/base/latest
-        _info "SUCCL symlink : /usr/local/birensupa/base/latest → $_sdk_dir"
+# Patch envs.py to point VLLM_SCCL_SO_PATH at the real SDK path rather than
+# the base/latest alias (which may not exist).  This avoids creating a symlink.
+_envs_py="/usr/local/lib/python3.10/dist-packages/vllm_br/envs.py"
+_sdk_dir=$(find /usr/local/birensupa/sdk -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V | tail -1)
+if [[ -n "$_sdk_dir" ]]; then
+    _succl_so="${_sdk_dir}/succl/lib/x86_64-linux-gnu/libsuccl.so"
+    if [[ -f "$_succl_so" && -f "$_envs_py" ]]; then
+        sed -i "s|/usr/local/birensupa/base/latest/succl/lib/x86_64-linux-gnu/libsuccl.so|${_succl_so}|g" \
+            "$_envs_py"
+        rm -f "$(dirname "$_envs_py")/__pycache__/envs.cpython-310.pyc" 2>/dev/null || true
+        _info "SUCCL path  : envs.py patched → ${_succl_so}"
     fi
 fi
+unset _envs_py _sdk_dir _succl_so
 
 # ── Build --kv-transfer-config JSON ──────────────────────────────────────────
 kv_port=$(( RANDOM % 1001 + 4000 ))
