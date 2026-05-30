@@ -283,6 +283,79 @@ Registry 工具集的完整说明见 [registry/README.md](registry/README.md)。
 
 ---
 
+## 节点 IP 变更恢复
+
+当 Master 节点的 IP 地址发生变化后（如 DHCP 重新分配、网卡更换），k8s 各组件因 TLS 证书和 kubeconfig 中硬编码了旧 IP 而无法启动。此工具集提供两个脚本处理此场景。
+
+### fix_reip.sh — 一次性 IP 变更修复
+
+```bash
+sudo bash setup/kubernets/fix_reip.sh <OLD_IP> <NEW_IP>
+# 示例：
+sudo bash setup/kubernets/fix_reip.sh 10.49.4.248 10.50.36.126
+```
+
+执行内容：
+1. 生成包含新 IP 的 kubeadm 配置
+2. 备份旧证书到 `/etc/kubernetes/pki-backup-<timestamp>/`
+3. 删除旧 leaf 证书（保留 CA），使用 `kubeadm init phase certs` 重新生成含新 IP SAN 的证书
+4. 用 `sed` 替换 `etcd.yaml`、`kube-apiserver.yaml` manifest 中的旧 IP
+5. 更新所有 kubeconfig 文件（admin、controller-manager、scheduler、kubelet、super-admin、`~/.kube/config`）
+6. 重启 kubelet
+
+> **注意：** 运行后还需手动重启 `kube-controller-manager` 和 `kube-scheduler` 的容器（它们在启动时缓存了旧 IP，仅删除 Pod 对象不够）：
+> ```bash
+> sudo mv /etc/kubernetes/manifests/kube-controller-manager.yaml /tmp/kcm.yaml && sleep 5 && sudo mv /tmp/kcm.yaml /etc/kubernetes/manifests/
+> sudo mv /etc/kubernetes/manifests/kube-scheduler.yaml /tmp/ks.yaml && sleep 5 && sudo mv /tmp/ks.yaml /etc/kubernetes/manifests/
+> ```
+> 同时更新 kube-proxy ConfigMap 中的 server 地址：
+> ```bash
+> kubectl get cm kube-proxy -n kube-system -o json | \
+>   python3 -c "import json,sys; d=json.load(sys.stdin); d['data']['kubeconfig.conf']=d['data']['kubeconfig.conf'].replace('https://<OLD_IP>:6443','https://<NEW_IP>:6443'); print(json.dumps(d))" | \
+>   kubectl apply -f -
+> kubectl rollout restart ds/kube-proxy -n kube-system
+> ```
+
+### on_restart.sh — 开机后自动健康检查与恢复
+
+```bash
+sudo bash setup/kubernets/on_restart.sh
+```
+
+该脚本会：
+1. 检测当前节点 IP 与 k8s 配置的 IP 是否一致
+2. 若不一致，自动调用 `fix_reip.sh`
+3. 等待 API Server 就绪
+4. 重启使用了旧 IP 的 static pod 容器（controller-manager、scheduler）
+5. 更新 kube-proxy ConfigMap（若需要）
+6. 验证 Registry 是否可访问
+
+**一键注册为 systemd 服务（开机自动运行）：**
+
+```bash
+sudo tee /etc/systemd/system/k8s-on-restart.service > /dev/null << 'EOF'
+[Unit]
+Description=K8s post-boot recovery and health check
+After=network-online.target kubelet.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 30
+ExecStart=/bin/bash /home/zanedong/br-release/setup/kubernets/on_restart.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable k8s-on-restart.service
+```
+
+---
+
 ## 注意事项
 
 - 所有 `sudo` 脚本需要 root 权限
