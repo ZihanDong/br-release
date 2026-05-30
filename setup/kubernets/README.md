@@ -19,6 +19,10 @@ setup/kubernets/
 ├── set-node-mode.sh        # 已加入节点的算力角色切换
 ├── k8s_clean.sh            # 清除 k8s 全部组件，恢复安装前状态（Ubuntu + Kylin）
 ├── k8s_clean-ubuntu.sh     # k8s_clean.sh 的前身，仅适用于 Ubuntu（归档保留）
+├── fix_reip.sh             # 【IP变更恢复】Master 节点 IP 变更后一键修复（证书+配置）
+├── fix_worker_reip.sh      # 【IP变更恢复】Worker 节点上执行：更新 kubelet.conf + registry 信任
+├── fix_worker_master_side.sh  # 【IP变更恢复】Master 上执行：更新 flannel 注解 + 等待 Worker 就绪
+├── on_restart.sh           # 开机后自动健康检查：检测 IP 变化并调用修复脚本
 ├── lib/                    # 公共函数库（脚本内部使用）
 │   ├── common.sh               # 通用工具函数（OS 检测、日志、版本比较等）
 │   ├── preflight-ubuntu.sh     # Ubuntu 预检（apt 依赖、ufw、内核模块等）
@@ -352,6 +356,57 @@ WantedBy=multi-user.target
 EOF
 sudo systemctl daemon-reload
 sudo systemctl enable k8s-on-restart.service
+```
+
+### Worker 节点 IP 变更修复
+
+Worker 节点 IP 变更（或 Master IP 变更导致 Worker 无法连接）时，需分两步操作。
+
+**第一步：在 worker 节点上执行**
+
+```bash
+# 拷贝脚本到 worker 节点后执行，或直接 SSH 进去运行
+sudo bash fix_worker_reip.sh <OLD_MASTER_IP> <NEW_MASTER_IP>
+
+# 示例（master IP 从 10.49.4.248 变为 10.50.36.126）：
+sudo bash fix_worker_reip.sh 10.49.4.248 10.50.36.126
+```
+
+执行内容：
+1. 备份并更新 `/etc/kubernetes/kubelet.conf`（master 的 API server 地址）
+2. 更新 containerd 的 registry 信任配置（`/etc/containerd/certs.d/`）
+3. 更新 `/etc/docker/daemon.json` 的 `insecure-registries`（如有 docker）
+4. 重启 kubelet
+5. 打印 master 侧需要执行的命令
+
+> 若 worker 自身的 IP 也变化，kubelet 重启后会自动向 API server 上报新 IP，无需额外配置。
+
+**第二步：在 master 节点上执行（等 worker 重连后）**
+
+```bash
+# WORKER_HOSTNAME：worker 节点的 hostname（kubectl get nodes 中的名称）
+# NEW_WORKER_IP：worker 节点的新 IP
+bash fix_worker_master_side.sh <WORKER_HOSTNAME> <NEW_WORKER_IP>
+
+# 示例：
+bash fix_worker_master_side.sh pj-3f-server002 10.50.36.200
+```
+
+执行内容：
+1. 等待 worker 节点 `Ready`（最多 120s）
+2. 更新 flannel 的 `public-ip` 注解（影响跨节点 Pod 网络的 VXLAN 隧道）
+3. 重启 worker 上的 flannel pod（使其重新建立 VXLAN peer）
+4. 打印节点和 Pod 状态汇总
+
+**完整流程示意：**
+
+```
+Worker 节点（SSH）                         Master 节点
+─────────────────────────────────          ──────────────────────────────────
+sudo bash fix_worker_reip.sh \
+    10.49.4.248 10.50.36.126
+                                    →      bash fix_worker_master_side.sh \
+                                               pj-3f-server002 10.50.36.200
 ```
 
 ---
