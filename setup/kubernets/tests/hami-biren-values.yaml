@@ -1,0 +1,32 @@
+# HAMi install values for validating Biren SVI scheduling on this cluster.
+# - admission webhook DISABLED: avoids a cluster-wide MutatingWebhook (which
+#   would intercept every pod on this shared master); test pods set
+#   schedulerName: hami-scheduler and runtimeClassName: biren explicitly.
+# - nvidia device-plugin DaemonSet DISABLED: Biren's own device plugin
+#   (ns biren-gpu) advertises birentech.com/* and injects /dev/biren via CDI.
+# - kube-scheduler sidecar reuses the image already cached on the node.
+schedulerName: "hami-scheduler"
+
+scheduler:
+  admissionWebhook:
+    enabled: false
+  kubeScheduler:
+    enabled: true
+    image:
+      registry: registry.k8s.io
+      repository: kube-scheduler
+      tag: "v1.30.0"
+      pullPolicy: IfNotPresent
+  extender:
+    image:
+      registry: "10.50.36.126:32000"
+      repository: hami/hami
+      tag: "biren-svi"
+      pullPolicy: IfNotPresent
+
+devicePlugin:
+  enabled: false
+
+devices:
+  biren:
+    enabled: true
