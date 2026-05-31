@@ -143,6 +143,22 @@ _file_exists "$_yaml" "pod+label: filename uses label value"
 _has "$_yaml" 'nodeSelector:'               "pod+label: nodeSelector set"
 _has "$_yaml" 'node-pool: gpu-a'            "pod+label: correct label kv"
 
+section "8b. Deploy — --vgpu half (Biren SVI 1/2)"
+_gen --task deploy --vgpu half "$MODEL"
+_yaml="${YAML_DIR}/${MODEL}-deploy-vgpu-half-p28800-r1.yaml"
+_file_exists "$_yaml" "vgpu-half: filename has -vgpu-half suffix"
+_has   "$_yaml" 'birentech.com/1-2-gpu: "1"'  "vgpu-half: requests one 1/2 SVI instance"
+_has   "$_yaml" 'schedulerName: hami-scheduler' "vgpu-half: routed through HAMi scheduler"
+_has   "$_yaml" 'name: vllm-qwen3-32b-vgpu-half' "vgpu-half: k8s name carries vgpu suffix"
+_hasnt "$_yaml" 'birentech.com/gpu: '          "vgpu-half: no whole-card resource"
+
+section "8c. Deploy — --vgpu quarter (Biren SVI 1/4)"
+_gen --task deploy --vgpu quarter "$MODEL"
+_yaml="${YAML_DIR}/${MODEL}-deploy-vgpu-quarter-p28800-r1.yaml"
+_file_exists "$_yaml" "vgpu-quarter: filename has -vgpu-quarter suffix"
+_has   "$_yaml" 'birentech.com/1-4-gpu: "1"'  "vgpu-quarter: requests one 1/4 SVI instance"
+_hasnt "$_yaml" 'birentech.com/gpu: '          "vgpu-quarter: no whole-card resource"
+
 section "9. Error cases"
 
 # --node and --label together should fail
@@ -171,6 +187,13 @@ if _gen --task deploy --label badlabel "$MODEL" 2>/dev/null; then
     _fail "malformed --label (no =): should exit non-zero"
 else
     _pass "malformed --label (no =): rejected"
+fi
+
+# invalid --vgpu value should fail
+if _gen --task deploy --vgpu third "$MODEL" 2>/dev/null; then
+    _fail "invalid --vgpu third: should exit non-zero"
+else
+    _pass "invalid --vgpu third: rejected"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

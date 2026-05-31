@@ -16,6 +16,14 @@
 #   --cpu <n>              CPU cores (request=n, limit=2n). Default: 32.
 #   --mem-per-gpu <n>      Memory per GPU in Gi (request=limit=n×gpus). Default: 128.
 #
+# Biren SVI vGPU (mutually exclusive with whole-card requests):
+#   --vgpu <half|quarter>  Request ONE fractional SVI instance instead of whole
+#                          cards: half -> birentech.com/1-2-gpu, quarter ->
+#                          birentech.com/1-4-gpu (qty 1). Bypasses the tp*pp
+#                          whole-card count (an SVI instance is a single device).
+#                          Adds a "-vgpu-<size>" suffix to the filename and to
+#                          the generated k8s resource names.
+#
 # Scale (deploy only):
 #   --replicas <n>         Number of Deployment replicas. Default: 1.
 #
@@ -60,6 +68,10 @@ usage() {
     echo "  --cpu <n>              CPU cores per replica (default: 32; limit=2n)."
     echo "  --mem-per-gpu <n>      Memory in Gi per GPU (default: 128; request=limit=n×gpus)."
     echo ""
+    echo "  Biren SVI vGPU:"
+    echo "  --vgpu <half|quarter>  Request ONE 1/2 or 1/4 SVI instance instead of whole cards"
+    echo "                         (birentech.com/1-2-gpu | 1-4-gpu = 1; bypasses tp*pp count)."
+    echo ""
     echo "  Scale (deploy only):"
     echo "  --replicas <n>         Deployment replicas (default: 1)."
     echo ""
@@ -79,6 +91,7 @@ OPT_LABEL=""
 OPT_CPU=32
 OPT_MEM_PER_GPU=128
 OPT_REPLICAS=1
+OPT_VGPU=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -100,6 +113,9 @@ while [[ $# -gt 0 ]]; do
         --replicas)
             [[ $# -lt 2 ]] && { _err "--replicas requires a numeric argument"; usage; }
             OPT_REPLICAS="$2"; shift 2 ;;
+        --vgpu)
+            [[ $# -lt 2 ]] && { _err "--vgpu requires an argument (half|quarter)"; usage; }
+            OPT_VGPU="$2"; shift 2 ;;
         -*)
             _err "Unknown option: $1"; usage ;;
         *)
@@ -122,6 +138,14 @@ done
     _err "--mem-per-gpu must be a positive integer"; exit 1; }
 [[ ! "$OPT_REPLICAS" =~ ^[0-9]+$ || "$OPT_REPLICAS" -lt 1 ]] && {
     _err "--replicas must be a positive integer"; exit 1; }
+# Normalize --vgpu (accept the common "quater" misspelling).
+if [[ -n "$OPT_VGPU" ]]; then
+    case "$OPT_VGPU" in
+        half) ;;
+        quarter|quater) OPT_VGPU="quarter" ;;
+        *) _err "--vgpu must be 'half' or 'quarter', got: '${OPT_VGPU}'"; usage ;;
+    esac
+fi
 
 # ── Resolve config ─────────────────────────────────────────────────────────────
 CONFIG_FILE=""
@@ -208,10 +232,38 @@ fi
 
 # ── GPU count and resource sizing ─────────────────────────────────────────────
 gpu_needed=$((tensor_parallel_size * pipeline_parallel_size))
+
+# Biren SVI vGPU: request a single fractional instance, not whole cards. The
+# resource NAME carries the granularity and the quantity is always 1, so the
+# tp*pp whole-card count is intentionally bypassed.
+GPU_RES_NAME="birentech.com/gpu"
+GPU_RES_QTY="$gpu_needed"
+VGPU_SUFFIX=""
+# SVI vGPU scheduling must go through the HAMi scheduler (it owns the
+# node-<flavor>-register accounting). Whole-card requests keep the default
+# scheduler, so this is only injected in --vgpu mode.
+_vgpu_sched_deploy=""
+_vgpu_sched_pod=""
+if [[ -n "$OPT_VGPU" ]]; then
+    case "$OPT_VGPU" in
+        half)    GPU_RES_NAME="birentech.com/1-2-gpu"; VGPU_SUFFIX="-vgpu-half" ;;
+        quarter) GPU_RES_NAME="birentech.com/1-4-gpu"; VGPU_SUFFIX="-vgpu-quarter" ;;
+    esac
+    [[ "$gpu_needed" -gt 1 ]] && _warn "--vgpu maps a single SVI instance; ignoring tp*pp=${gpu_needed} for GPU count."
+    GPU_RES_QTY=1
+    gpu_needed=1
+    _vgpu_sched_deploy="      schedulerName: hami-scheduler"
+    _vgpu_sched_pod="  schedulerName: hami-scheduler"
+fi
+
 cpu_lim=$((OPT_CPU * 2))
 mem_gi=$((gpu_needed * OPT_MEM_PER_GPU))
 
-_info "GPU needed  : tp=$tensor_parallel_size × pp=$pipeline_parallel_size = $gpu_needed"
+if [[ -n "$OPT_VGPU" ]]; then
+    _info "vGPU        : ${OPT_VGPU} -> ${GPU_RES_NAME}=1 (whole-card count bypassed)"
+else
+    _info "GPU needed  : tp=$tensor_parallel_size × pp=$pipeline_parallel_size = $gpu_needed"
+fi
 _info "Resources   : cpu req=${OPT_CPU} lim=${cpu_lim}  mem=${mem_gi}Gi (${OPT_MEM_PER_GPU}Gi/GPU)"
 [[ "$K8S_TYPE" == "deploy" ]] && _info "Replicas    : ${OPT_REPLICAS}"
 
@@ -233,11 +285,18 @@ else
     LABEL_KEY="birentech.com"
     LABEL_VAL="gpu"
     _DEFAULT_LABEL=true
-    _avail=$(kubectl get nodes -l birentech.com=gpu \
-        -o jsonpath='{range .items[*]}{.status.allocatable.birentech\.com/gpu}{"\n"}{end}' \
-        2>/dev/null | awk -v need="$gpu_needed" 'BEGIN{ok=0} $1+0>=need{ok=1} END{print ok}' || echo 0)
+    _avail=$(kubectl get nodes -l birentech.com=gpu -o json 2>/dev/null | python3 -c "
+import sys, json
+need=$gpu_needed; res='$GPU_RES_NAME'; ok=0
+try:
+    for n in json.load(sys.stdin).get('items', []):
+        q = n.get('status', {}).get('allocatable', {}).get(res, '0')
+        if int(q) >= need: ok = 1
+except Exception:
+    pass
+print(ok)" 2>/dev/null || echo 0)
     [[ "$_avail" != "1" ]] && \
-        _warn "No GPU node with >= $gpu_needed birentech.com/gpu found; pod will stay Pending."
+        _warn "No GPU node with >= $gpu_needed ${GPU_RES_NAME} found; pod will stay Pending."
     _info "Scheduling  : nodeSelector birentech.com=gpu (default)"
 fi
 
@@ -269,13 +328,15 @@ elif [[ "$SCHED_TYPE" == "label" ]] && ! $_DEFAULT_LABEL; then
 fi
 
 if [[ "$K8S_TYPE" == "deploy" ]]; then
-    OUT_YAML="${YAML_DIR}/${model_weights}-deploy${_sched_suffix}-p${port}-r${OPT_REPLICAS}.yaml"
+    OUT_YAML="${YAML_DIR}/${model_weights}-deploy${VGPU_SUFFIX}${_sched_suffix}-p${port}-r${OPT_REPLICAS}.yaml"
 else
-    OUT_YAML="${YAML_DIR}/${model_weights}-pod${_sched_suffix}-p${port}.yaml"
+    OUT_YAML="${YAML_DIR}/${model_weights}-pod${VGPU_SUFFIX}${_sched_suffix}-p${port}.yaml"
 fi
 
 # ── k8s names (DNS-1035: dots not allowed — replace with dashes) ──────────────
-k8s_name="${model_weights//./-}"
+# The vGPU suffix is part of the names so half/quarter variants of the same
+# model are distinct Deployments/Services and don't collide.
+k8s_name="${model_weights//./-}${VGPU_SUFFIX}"
 APP_LABEL="vllm-${k8s_name}"
 DEPLOY_NAME="vllm-${k8s_name}"
 SVC_NAME="vllm-${k8s_name}"
@@ -374,6 +435,7 @@ spec:
       # birentech.com/gpu device plugin selects which cards are allocated per pod.
       # No privileged mode or hardcoded BIREN_VISIBLE_DEVICES needed.
       runtimeClassName: biren
+${_vgpu_sched_deploy}
 ${_sched_deploy}
       containers:
       - name: vllm-server
@@ -398,11 +460,11 @@ ${_sched_deploy}
           protocol: TCP
         resources:
           requests:
-            birentech.com/gpu: "${gpu_needed}"
+            ${GPU_RES_NAME}: "${GPU_RES_QTY}"
             cpu: "${OPT_CPU}"
             memory: "${mem_gi}Gi"
           limits:
-            birentech.com/gpu: "${gpu_needed}"
+            ${GPU_RES_NAME}: "${GPU_RES_QTY}"
             cpu: "${cpu_lim}"
             memory: "${mem_gi}Gi"
         securityContext:
@@ -521,6 +583,7 @@ spec:
   # RuntimeClass 'biren': GPU devices allocated by birentech.com/gpu device plugin.
   # Device plugin injects BIREN_VISIBLE_DEVICES and enforces cgroup device isolation.
   runtimeClassName: biren
+${_vgpu_sched_pod}
 ${_sched_pod}
   restartPolicy: Never
   containers:
@@ -541,11 +604,11 @@ ${_sched_pod}
       value: NUMA
     resources:
       requests:
-        birentech.com/gpu: "${gpu_needed}"
+        ${GPU_RES_NAME}: "${GPU_RES_QTY}"
         cpu: "${OPT_CPU}"
         memory: "${mem_gi}Gi"
       limits:
-        birentech.com/gpu: "${gpu_needed}"
+        ${GPU_RES_NAME}: "${GPU_RES_QTY}"
         cpu: "${cpu_lim}"
         memory: "${mem_gi}Gi"
     securityContext:

@@ -48,6 +48,18 @@ for res, (cw, mem) in flavors.items():
     print(f"  applied {key}  ({n} instances, {mem} MiB each)")
 PY
 
+# Clear any stale node-handshake-* annotations. The scheduler's register loop
+# only (re)adds a node to its in-memory cache when CheckHealth returns
+# needUpdate=true, which happens on an EMPTY handshake. A handshake left as
+# "Requesting_<old>" by a previous scheduler makes a freshly (re)started
+# scheduler treat the node as healthy-but-no-update and never register it, so
+# pods stay Pending with "node unregistered". Removing it lets the next
+# register cycle re-ingest the devices.
+log "clearing stale hami.io/node-handshake-* annotations (forces re-registration)"
+for cw in BirenGPU Biren-1of2 Biren-1of4; do
+  kubectl annotate node "$NODE" "hami.io/node-handshake-${cw}-" >/dev/null 2>&1 || true
+done
+
 log "current biren allocatable on $NODE:"
 kubectl get node "$NODE" -o json | python3 -c "import sys,json;a=json.load(sys.stdin)['status']['allocatable'];[print('   ',k,'=',v) for k,v in sorted(a.items()) if 'birentech' in k]"
 ok "node-register annotations published"
