@@ -1,0 +1,32 @@
+# Biren SVI vGPU test pod — exercises dynamic SVI (provision + auto-reclaim).
+#
+# Prereq: HAMi-br deployed with the biren-svi-manager (set-node-mode biren --vgpu,
+# package built with dynamicSVI). With all GPUs whole, applying this pod has no
+# free 1/2 instance, so biren-svi-manager partitions an idle whole GPU to MODE1
+# (`brsmi gpu set -s 1`); the pod then schedules onto the new 1/2 instance.
+# After the pod is deleted (no vGPU occupancy), the manager reverts that GPU to a
+# whole card automatically.
+#
+# Watch it:
+#   kubectl apply -f vgpu-test-pod.yaml
+#   watch 'brsmi gpu --query-gpu=index,svi.mode.current --format=csv,noheader; \
+#          kubectl get pod vgpu-test-pod -o wide'
+#   kubectl delete pod vgpu-test-pod      # GPU auto-recovers to whole within ~1-2 min
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vgpu-test-pod
+  namespace: default
+  labels: { app: vgpu-test }
+spec:
+  schedulerName: hami-scheduler      # HAMi schedules the SVI instance
+  runtimeClassName: biren            # Biren runtime injects the allocated /dev/biren/card_N
+  restartPolicy: Never
+  containers:
+    - name: vgpu-test
+      image: 10.50.36.126:32000/base/birensupa-sdk:26.04.rc2-br1xx
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "echo allocated BR_PHY_CARDS=$BR_PHY_CARDS; sleep infinity"]
+      resources:
+        limits:
+          birentech.com/1-2-gpu: "1"   # one 1/2 SVI instance (use 1-4-gpu for 1/4)
