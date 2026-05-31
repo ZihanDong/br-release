@@ -53,6 +53,7 @@ All scripts read `lib.sh` for `REGISTRY` / `NODE` and override-able via env vars
 | `svi-1of2-test.yaml` / `svi-1of4-test.yaml` | Test pods requesting a 1/2 / 1/4 SVI instance. |
 | `in-pod-suvs.sh` | Runs inside a pod: installs Biren DCGM (`suvs`) and runs the compute test. |
 | `run-svi-tests.sh` | End-to-end driver for both granularities. |
+| `vgpu-reclaim-test.sh` | Dynamic-SVI test: task release auto-recovers the whole GPU (needs biren-svi-manager). |
 | `lib.sh` | shared helpers (registry, node, proxy bypass). |
 
 ## 1. Compile the scheduler
@@ -146,6 +147,37 @@ fraction** (~1/2 ≈ 820 GB/s, ~1/4 ≈ 395 GB/s of a whole Biren166). membw pri
 `Fail for bandwidth < 1480 GB/s` because that threshold is for a *whole* GPU —
 seeing roughly half/quarter is the proof the partition is enforced, so the
 script reports the measured value rather than gating on the whole-GPU bar.
+
+## 5. Dynamic SVI auto-reclaim — `./vgpu-reclaim-test.sh`
+
+Requires the `biren-svi-manager` deployed (package built with `dynamicSVI`,
+i.e. `set-node-mode biren --vgpu`). Tests that **releasing a vGPU task
+auto-recovers the whole physical GPU**:
+
+```bash
+sudo ./vgpu-reclaim-test.sh [--flavor half|quarter] [--gpu <index>]
+```
+
+Steps it performs (and why): the manager continuously reclaims idle partitioned
+GPUs, so the test (1) **stops the manager** during setup, (2) partitions an idle
+whole GPU + refreshes the device plugin, (3) registers the SVI devices + the
+scheduler, (4) runs `templates/vgpu-test-pod.yaml` on the new instance,
+(5) **restarts the manager** and confirms the GPU stays partitioned while the
+task runs (occupancy prevents reclaim), then (6) **deletes the task** and asserts
+the GPU reverts to a whole card. Expected tail:
+
+```
+[OK] GPU 0 still Enabled while task runs (occupancy prevents reclaim)
+[OK] GPU 0 AUTO-RECOVERED to a whole card after task release
+[OK] RECLAIM TEST PASSED
+```
+
+Manual check: with a task running on a partitioned GPU, `kubectl delete pod
+vgpu-test-pod` and watch
+`brsmi gpu --query-gpu=index,svi.mode.current --format=csv,noheader` flip the
+GPU from `Enabled` to `Disabled` within ~1 min. (The vendor device plugin's
+advertise oscillates briefly after a mode change, so the script waits for a
+stable count and retries the pod — a bare manual run may need a retry.)
 
 ## Cleanup
 
