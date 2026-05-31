@@ -11,6 +11,7 @@ This directory contains skill files for use by Claude Code agents. Each skill is
 | `sglang` | [sglang.md](sglang.md) | Launch SGLang inference servers (Docker + k8s) on BirenTech GPU nodes; supports VL multimodal models; scripts: sglang_server.sh + run_docker.sh + k8s_yaml_gen.sh + k8s_apply.sh |
 | `vllm-script-to-conf` | [vllm-script-to-conf.md](vllm-script-to-conf.md) | Convert raw vLLM launch scripts (start_<model>.sh) into structured conf files under configs/ |
 | `load_balance` | [load_balance.md](load_balance.md) | OpenAI-compatible round-robin load balancer for vLLM backends; scripts: start_lb.sh + lb_server.py + Dockerfile + configs/ |
+| `vllm-perf-diagnosis` | [vllm-perf-diagnosis.md](vllm-perf-diagnosis.md) | Diagnose/fix vLLM TTFT/TPOT blow-up at higher concurrency on BirenTech GPUs: chunked-prefill starving decode + KV-cache preemption cliff; reading bench results & scheduler logs; no-preemption sizing formula |
 
 ## How to Use in an Agent
 
