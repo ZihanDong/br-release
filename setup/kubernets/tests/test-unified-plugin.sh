@@ -7,7 +7,10 @@
 #
 # 环境变量:
 #   KUBECONFIG    默认 /etc/kubernetes/admin.conf（需 root 读取）
-#   NODE          查询 allocatable 的节点（默认本机 hostname -s）
+#   NODE          目标 GPU 节点（查询 allocatable；PIN_NODE=1 时也是 Pod 绑定的节点）。默认本机 hostname -s
+#   PIN_NODE      置 1 则把测试 Pod 经 nodeSelector 绑定到 $NODE（“绑定到某节点”验证）。
+#                 注意：不要用 `kubectl cordon` 来绑定 —— cordon 会令 HAMi extender 无法在该
+#                 集群其余可调度节点上动态切分 SVI/vGPU，导致 Pod 一直 Pending。
 #   NS            测试 Pod 命名空间（默认 default）
 #   TEST_IMAGE    Pod 镜像；须已存在于 GPU 节点（IfNotPresent，不走 registry）。默认 ubuntu:22.04
 #   RUN_TIMEOUT   等待 Running 的秒数（默认 300；首次冷切分 SVI/vGPU 约 2 分钟）
@@ -38,8 +41,16 @@ phase()   { kubectl -n "$NS" get pod "$1" -o jsonpath='{.status.phase}' 2>/dev/n
 logline() { kubectl -n "$NS" logs "$1" 2>/dev/null | head -1; }
 del()     { kubectl -n "$NS" delete pod "$1" --ignore-not-found --wait=false >/dev/null 2>&1; }
 
-# apply_tpl FILE  —— 用 TEST_IMAGE 替换模板镜像后 apply
-apply_tpl() { sed "s|image: ubuntu:22.04|image: ${TEST_IMAGE}|" "${TPL}/$1" | kubectl -n "$NS" apply -f - >/dev/null 2>&1; }
+# apply_tpl FILE  —— 用 TEST_IMAGE 替换模板镜像后 apply；PIN_NODE=1 时把 Pod 经
+# nodeSelector 绑定到 $NODE（用于“绑定到某节点”验证，比 cordon 更安全 —— cordon 会
+# 让 HAMi extender 把整个节点视为不可用，反而无法在余下节点动态切分 SVI/vGPU）。
+apply_tpl() {
+  local pin=""
+  [ "${PIN_NODE:-0}" = 1 ] && pin="  nodeSelector: {kubernetes.io/hostname: ${NODE}}\n"
+  sed -e "s|image: ubuntu:22.04|image: ${TEST_IMAGE}|" \
+      -e "s|^  schedulerName: hami-scheduler|${pin}  schedulerName: hami-scheduler|" \
+      "${TPL}/$1" | kubectl -n "$NS" apply -f - >/dev/null 2>&1
+}
 
 wait_running() { # NAME TIMEOUT
   local name="$1" t="$2" i=0
@@ -103,7 +114,8 @@ if [ "$GROUP" = all ] || [ "$GROUP" = vgpu ]; then
   if wait_running biren-vgpu "$RUN_TIMEOUT"; then
     ok "vGPU Pod Running"
     logline biren-vgpu | grep -q 'BR_VGPU_UUID=[0-9a-f]' && ok "vGPU Pod 已注入 BR_VGPU_UUID" || bad "vGPU Pod 未注入 BR_VGPU_UUID"
-    if [ "$have_tool" = 1 ]; then
+    vnode=$(kubectl -n "$NS" get pod biren-vgpu -o jsonpath='{.spec.nodeName}' 2>/dev/null)
+    if [ "$have_tool" = 1 ] && [ "$vnode" = "$(hostname -s)" ]; then
       sleep 10
       # 每实例 profile 注册在容器 cgroup，host root cgroup 看不到 list/query；
       # host 可见的证据是该卡 vGPU MODE = ACTIVE。
@@ -111,6 +123,10 @@ if [ "$GROUP" = all ] || [ "$GROUP" = vgpu ]; then
       if [ -n "$dbdf" ] && sudo "$BR_VGPU_TOOL" status --dbdf "$(printf '0x%x' "$dbdf")" 2>/dev/null | grep -q 'ACTIVE (1)'; then
         ok "驱动确认卡处于 vGPU ACTIVE 模式 (dbdf=$(printf '0x%x' "$dbdf"))"
       else bad "驱动未显示卡处于 vGPU ACTIVE 模式"; fi
+    else
+      # 从主节点测远端节点时，本机 br_vgpu_tool 看不到 Pod 所在节点的卡 —— 跳过，
+      # 可在该节点上执行 `br_vgpu_tool status --dbdf <卡>` 验证。
+      skip "驱动级 ACTIVE 检查（Pod 调度在 ${vnode:-未知}，非本机；请在该节点验证）"
     fi
   else bad "vGPU Pod 未在 ${RUN_TIMEOUT}s 内 Running（vGPU 需节点加载 1.12.0 KMD + br_vgpu_tool）"; fi
   del biren-vgpu
