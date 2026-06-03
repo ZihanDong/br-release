@@ -2,12 +2,17 @@
 # 切换节点的算力角色
 #
 # 用法：
-#   sudo ./set-node-mode.sh <mode> [节点名1,节点名2,...]
+#   sudo ./set-node-mode.sh <mode> [--vgpu] [节点名1,节点名2,...]
 #
 # mode 可选值：
 #   cpu   去除 control-plane:NoSchedule 污点，节点以纯 CPU 算力参与调度
 #   biren 去除污点，打 GPU 标签，部署 BirenTech device plugin，节点作为 GPU 算力节点
 #   none  恢复 control-plane:NoSchedule 隔离污点，移出调度池
+#
+# --vgpu（仅 biren 模式）：在 biren device plugin（整卡调度）之上，额外导入
+#   HAMi-br 调度器并注册本节点的 SVI 设备，使该节点同时提供 biren vGPU
+#   （1/2、1/4）调度能力。需先用 HAMi-br/hack/package-hami-svi.sh 生成安装包，
+#   解压到 HAMI_PLUGIN_DIR（默认 packages/hami-br）。
 #
 # 不指定节点时默认对本机 hostname 对应节点操作。
 # 多节点用逗号分隔，如：node1,node2
@@ -35,25 +40,45 @@ source "${LIB_DIR}/common.sh"
 : "${KUBECONFIG:=/etc/kubernetes/admin.conf}"
 : "${PLUGIN_NAMESPACE:=biren-gpu}"
 : "${PLUGIN_DIR:=${SCRIPT_DIR}/../../packages/biren}"
+# HAMi-br plugin package (for --vgpu): contains hami-svi.tar +
+# hami-scheduler.yaml + register-svi-devices.sh (see HAMi-br/hack/package-hami-svi.sh).
+: "${HAMI_PLUGIN_DIR:=${SCRIPT_DIR}/../../packages/hami-br}"
+: "${HAMI_NAMESPACE:=hami-system}"
 KC="--kubeconfig ${KUBECONFIG}"
 
 CONTROL_PLANE_TAINT="node-role.kubernetes.io/control-plane:NoSchedule"
 GPU_LABEL="birentech.com=gpu"
 
 # ── 参数解析 ──────────────────────────────────────────────────────────────────
-MODE="${1:-}"
-NODE_ARG="${2:-}"
-
 usage() {
-    echo "用法: sudo $0 <cpu|biren|none> [节点名1,节点名2,...]"
-    echo "  cpu   - 纯 CPU 算力节点"
-    echo "  biren - BirenTech GPU 算力节点"
-    echo "  none  - 恢复 control-plane 隔离"
+    echo "用法: sudo $0 <cpu|biren|none> [--vgpu] [节点名1,节点名2,...]"
+    echo "  cpu     - 纯 CPU 算力节点"
+    echo "  biren   - BirenTech GPU 算力节点（导入 biren device plugin，整卡调度）"
+    echo "  none    - 恢复 control-plane 隔离"
+    echo "  --vgpu  - 仅 biren 模式：同时导入 HAMi-br plugin 并注册本节点 SVI 设备，"
+    echo "            使该节点额外提供 biren vGPU（1/2、1/4）调度能力"
     exit 1
 }
 
+MODE=""
+NODE_ARG=""
+VGPU=false
+_positional=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --vgpu)    VGPU=true; shift ;;
+        -h|--help) usage ;;
+        -*)        echo "未知选项: $1"; usage ;;
+        *)         _positional+=("$1"); shift ;;
+    esac
+done
+MODE="${_positional[0]:-}"
+NODE_ARG="${_positional[1]:-}"
+
 [[ "${MODE}" == "cpu" || "${MODE}" == "biren" || "${MODE}" == "none" ]] \
     || usage
+[[ "${VGPU}" == true && "${MODE}" != "biren" ]] \
+    && { echo "错误: --vgpu 仅适用于 biren 模式"; usage; }
 
 # ── 前置检查 ──────────────────────────────────────────────────────────────────
 preflight_check() {
@@ -274,6 +299,59 @@ restore_runc_runtimeclass() {
     fi
 }
 
+# ── HAMi-br vGPU plugin（--vgpu）──────────────────────────────────────────────
+# 在 biren device plugin 之上额外导入 HAMi-br 调度器并注册本节点 SVI 设备，
+# 使该节点可提供 biren vGPU（1/2、1/4）调度。实际设备分配仍由 vendor device
+# plugin 完成，HAMi 负责 vGPU 的放置/计数。
+check_hami_dir() {
+    [[ -d "${HAMI_PLUGIN_DIR}" ]] || die "HAMi-br plugin 目录不存在: ${HAMI_PLUGIN_DIR}
+请先用 HAMi-br/hack/package-hami-svi.sh 生成安装包并解压到该目录
+（需含 hami-svi.tar、hami-scheduler.yaml、register-svi-devices.sh）。"
+    local f
+    for f in hami-svi.tar hami-scheduler.yaml register-svi-devices.sh; do
+        [[ -f "${HAMI_PLUGIN_DIR}/${f}" ]] || die "HAMi-br plugin 目录缺少文件: ${f}"
+    done
+}
+
+load_hami_image() {
+    command_exists ctr || die "未找到 ctr（containerd CLI）。"
+    local tar="${HAMI_PLUGIN_DIR}/hami-svi.tar" img
+    img=$(tar -xOf "${tar}" manifest.json 2>/dev/null | grep -oP '"RepoTags":\["\K[^"]+' | head -1)
+    [[ -n "${img}" ]] || die "无法读取 HAMi 镜像名: ${tar}"
+    if ctr -n k8s.io images ls 2>/dev/null | grep -q "${img}"; then
+        log_info "  HAMi 镜像已存在，跳过导入: ${img}"
+    else
+        log_info "导入 HAMi 镜像: ${img}"
+        ctr -n k8s.io images import "${tar}" 2>&1 | tail -2
+    fi
+}
+
+deploy_hami_scheduler() {
+    log_info "部署 HAMi-br 调度器（hami-scheduler）..."
+    kubectl apply -f "${HAMI_PLUGIN_DIR}/hami-scheduler.yaml" ${KC}
+    log_info "等待 hami-scheduler 就绪（最多 3 分钟）..."
+    kubectl rollout status deploy/hami-scheduler -n "${HAMI_NAMESPACE}" --timeout=180s ${KC} 2>/dev/null \
+        || log_warn "hami-scheduler 未在 3 分钟内就绪，请手动检查。"
+}
+
+register_svi_devices() {
+    local node="$1"
+    log_info "  注册节点 ${node} 的 SVI 设备到 HAMi..."
+    KUBECONFIG="${KUBECONFIG}" bash "${HAMI_PLUGIN_DIR}/register-svi-devices.sh" "${node}" \
+        || log_warn "  节点 ${node}: SVI 设备注册失败。"
+}
+
+enable_vgpu() {
+    log_info "── 附加: HAMi-br vGPU 调度能力（--vgpu）──"
+    check_hami_dir
+    load_hami_image
+    deploy_hami_scheduler
+    for node in "${_NODES[@]}"; do
+        kubectl label node "${node}" "hami.io/vgpu=on" ${KC} --overwrite >/dev/null 2>&1 || true
+        register_svi_devices "${node}"
+    done
+}
+
 # ── 打印当前节点状态 ──────────────────────────────────────────────────────────
 print_status() {
     echo
@@ -302,8 +380,19 @@ print_status() {
         echo
         log_info "GPU allocatable（需 device plugin 启动后约 30s 刷新）:"
         kubectl get nodes ${KC} \
-            -o custom-columns='NODE:.metadata.name,GPU:.status.allocatable.birentech\.com/gpu' \
+            -o custom-columns='NODE:.metadata.name,GPU:.status.allocatable.birentech\.com/gpu,1/2:.status.allocatable.birentech\.com/1-2-gpu,1/4:.status.allocatable.birentech\.com/1-4-gpu' \
             2>/dev/null || true
+        if [[ "${VGPU}" == true ]]; then
+            echo
+            log_info "HAMi-br vGPU 调度器状态:"
+            kubectl get pods -n "${HAMI_NAMESPACE}" -l app.kubernetes.io/component=hami-scheduler -o wide ${KC} 2>/dev/null || true
+            log_info "节点 SVI 注册注解:"
+            for node in "${_NODES[@]}"; do
+                kubectl get node "${node}" ${KC} -o json 2>/dev/null \
+                    | python3 -c "import sys,json;a=json.load(sys.stdin)['metadata']['annotations'];[print('   ',k) for k in sorted(a) if 'node-' in k and 'register' in k]" 2>/dev/null || true
+            done
+            log_info "vGPU pod 请使用 schedulerName: hami-scheduler + birentech.com/1-2-gpu|1-4-gpu"
+        fi
     fi
     log_info "════════════════════════════════════════════════════"
 }
@@ -338,6 +427,11 @@ mode_biren() {
         remove_taint  "${node}"
         add_gpu_label "${node}"
     done
+
+    # --vgpu: 额外导入 HAMi-br 调度器，使节点同时提供 biren vGPU 调度能力。
+    if [[ "${VGPU}" == true ]]; then
+        enable_vgpu
+    fi
 }
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────

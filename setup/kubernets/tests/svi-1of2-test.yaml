@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: biren-svi-1of2-test
+  namespace: default
+  labels: { app: biren-svi-test }
+spec:
+  schedulerName: hami-scheduler      # force HAMi to schedule (proves the HAMi path)
+  runtimeClassName: biren            # Biren runtime injects the allocated /dev/biren/card_N (CDI)
+  restartPolicy: Never
+  containers:
+    - name: suvs
+      image: 10.50.36.126:32000/base/birensupa-sdk:26.04.rc2-br1xx
+      imagePullPolicy: IfNotPresent  # image pre-loaded into containerd on the node
+      command: ["sleep", "infinity"]
+      resources:
+        limits:
+          birentech.com/1-2-gpu: "1"   # one 1/2 SVI instance
+      volumeMounts:
+        - { name: driver, mountPath: /host-driver, readOnly: true }
+  volumes:
+    - name: driver
+      hostPath: { path: /data/release/2604rc2/packages/ubuntu-22.04, type: Directory }
