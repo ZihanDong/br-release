@@ -1,0 +1,31 @@
+# vGPU 软切分（soft-partition）—— HAMi-Biren 统一插件
+#
+# 申请一个 vGPU 切片：任意算力配额（vgpu-cores = N/32 张卡的 SPC，驱动时分复用）+
+# 显存配额（vgpu-memory，MB）。多个 vGPU Pod 可共享一张物理卡，HAMi 按算力+显存
+# bin-pack。卡由 biren-mode-manager 按需置入 vGPU 模式（br_vgpu_tool），空闲后回收为整卡。
+#
+# 前提：
+#   · 节点已 `set-node-mode.sh biren --vgpu`；
+#   · vGPU 额外需要节点加载与内核匹配的 1.12.0 KMD（packages/hami-biren/kmd/biren.ko，
+#     管理员手动 insmod）。未加载时 vGPU Pod 无法 provision（整卡/SVI 不受影响）。
+#
+#   kubectl apply -f biren-vgpu.yaml
+#   kubectl logs biren-vgpu     # BR_VGPU_UUID=... SPC=8 HBM=8192 DBDF=0x...
+#   kubectl delete -f biren-vgpu.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: biren-vgpu
+  namespace: default
+spec:
+  schedulerName: hami-scheduler
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: ubuntu:22.04
+      command: ["sh", "-c", "echo BR_VGPU_UUID=$BR_VGPU_UUID SPC=$BR_VGPU_SPC HBM=$BR_VGPU_HBM DBDF=$BR_VGPU_DBDF && sleep 3600"]
+      resources:
+        limits:
+          birentech.com/vgpu: "1"            # 一个 vGPU 设备
+          birentech.com/vgpu-cores: "8"      # 8 SPC = 整卡算力的 8/32
+          birentech.com/vgpu-memory: "8192"  # 8 GiB 显存配额（MB）

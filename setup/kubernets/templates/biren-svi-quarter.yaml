@@ -1,0 +1,24 @@
+# SVI 硬切分 1/4（quarter-GPU）—— HAMi-Biren 统一插件
+#
+# 申请一个 1/4 SVI 实例（birentech.com/1-4-gpu，166C 上约 16GB）。无空闲 1/4 实例时，
+# biren-mode-manager 把空闲整卡按需切成 MODE2（`brsmi gpu set -s 2`），空闲后自动回收。
+#
+# 前提：节点已 `set-node-mode.sh biren --vgpu`。
+#   kubectl apply -f biren-svi-quarter.yaml
+#   kubectl logs biren-svi-quarter      # BR_PHY_CARDS=card_N
+#   kubectl delete -f biren-svi-quarter.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: biren-svi-quarter
+  namespace: default
+spec:
+  schedulerName: hami-scheduler
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: ubuntu:22.04
+      command: ["sh", "-c", "echo BR_PHY_CARDS=$BR_PHY_CARDS && sleep 3600"]
+      resources:
+        limits:
+          birentech.com/1-4-gpu: "1"   # 一个 1/4 SVI 实例；可申请多个，如 "2"

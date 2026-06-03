@@ -63,14 +63,19 @@ sudo ./registry/registry-trust.sh apply worker01,worker02
 # Master 节点参与 CPU 调度
 sudo ./set-node-mode.sh cpu
 
-# 切换为 BirenTech GPU 节点
+# 切换为 BirenTech GPU 节点（原厂整卡插件，仅整卡调度）
 sudo ./set-node-mode.sh biren
+
+# 切换为 GPU 节点并启用 HAMi-Biren 统一插件（整卡 + SVI + vGPU）
+# 取代原厂整卡插件；vGPU 软切分需节点加载 1.12.0 KMD
+sudo ./set-node-mode.sh biren --vgpu
 
 # 恢复隔离（仅运行系统组件）
 sudo ./set-node-mode.sh none
 
 # 批量切换多个 Worker 节点为 GPU 节点
 sudo ./set-node-mode.sh biren worker01,worker02
+sudo ./set-node-mode.sh biren --vgpu worker01,worker02   # 批量部署统一插件
 ```
 
 ---
@@ -96,4 +101,5 @@ sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./master.sh
 - **国内/Kylin 环境**：`install.sh` 和 `master.sh` 均需传入 `REGISTRY_MIRROR=registry.aliyuncs.com/google_containers`，否则 containerd sandbox_image 和 kubeadm 镜像拉取会因 `registry.k8s.io` 不可达而失败
 - `join.sh biren` 需要 admin.conf；若 master 已通过 `set-node-mode.sh biren` 首次部署，该前提已满足
 - `packages/biren/` 目录需提前填充（见 `set-node-mode.sh` 说明中的 BirenTech device plugin 准备步骤）
+- `set-node-mode.sh biren --vgpu` 另需 `packages/hami-biren/` 安装包（见 `packages/README.md`）；vGPU 软切分还需节点加载 1.12.0 KMD
 - 清除操作（`registry_clean.sh`、`k8s_clean.sh`）均需用户二次确认，不会静默执行

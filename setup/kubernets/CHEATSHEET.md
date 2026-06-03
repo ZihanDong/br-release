@@ -141,6 +141,8 @@ kubectl taint node <node-name> node-role.kubernetes.io/control-plane:NoSchedule
 ```
 
 > 也可直接使用 `setup/kubernets/set-node-mode.sh <cpu|biren|none>` 脚本批量操作。
+> 加 `--vgpu`（仅 biren）部署 HAMi-Biren 统一插件，用同一套插件同时调度
+> 整卡 + SVI(1/2、1/4) + vGPU 软切分：`sudo ./set-node-mode.sh biren --vgpu`。
 
 ---
 

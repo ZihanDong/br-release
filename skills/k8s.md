@@ -25,7 +25,7 @@ metadata:
 | `install.sh` | yes | Install containerd + kubeadm/kubelet/kubectl on a node (Ubuntu or Kylin, auto-detected) |
 | `master.sh` | yes | Init control-plane (kubeadm init + CNI); outputs join command |
 | `join.sh <mode>` | yes | Join a node to an existing cluster as cpu / biren / worker |
-| `set-node-mode.sh <mode>` | yes | Switch an already-joined node between cpu / biren / none |
+| `set-node-mode.sh <mode> [--vgpu]` | yes | Switch an already-joined node between cpu / biren / none. `biren --vgpu` deploys the unified HAMi-Biren plugin (replaces the stock whole-card plugin; one plugin schedules whole-card + SVI 1/2,1/4 + vGPU soft-partition). vGPU soft-partition needs the 1.12.0 KMD loaded on the node; bundle from `packages/hami-biren/`. |
 | `k8s_clean.sh` | yes | Reset system to pre-k8s state; works on Ubuntu and Kylin; prompts before executing |
 | `registry/setup-registry.sh` | yes | Deploy registry:2 in k8s; writes registry-trust.conf |
 | `registry/update_images.sh` | yes | Sync images between images.conf and registry (add/purge/conf_gen) |
@@ -153,11 +153,13 @@ Use `set-node-mode.sh` for nodes **already in the cluster** (including the maste
 ```bash
 # Local node
 sudo bash setup/kubernets/set-node-mode.sh cpu
-sudo bash setup/kubernets/set-node-mode.sh biren
+sudo bash setup/kubernets/set-node-mode.sh biren           # stock whole-card plugin
+sudo bash setup/kubernets/set-node-mode.sh biren --vgpu    # unified HAMi plugin: whole + SVI + vGPU
 sudo bash setup/kubernets/set-node-mode.sh none
 
 # Specific or multiple nodes (comma-separated)
 sudo bash setup/kubernets/set-node-mode.sh biren node1,node2
+sudo bash setup/kubernets/set-node-mode.sh biren --vgpu node1,node2
 ```
 
 Environment variables:
@@ -165,8 +167,12 @@ Environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `KUBECONFIG` | `/etc/kubernetes/admin.conf` | kubectl config |
-| `PLUGIN_DIR` | `packages/biren/` | Directory containing `*.tar` image and `biren-device-plugin.yaml` |
+| `PLUGIN_DIR` | `packages/biren/` | (plain `biren`) Directory containing `*.tar` image and `biren-device-plugin.yaml` |
 | `PLUGIN_NAMESPACE` | `biren-gpu` | Namespace for device plugin DaemonSet |
+| `HAMI_BUNDLE_DIR` | `packages/hami-biren/` | (`--vgpu`) HAMi-Biren bundle: `images/ chart/ deploy/ kmd/` |
+| `HAMI_NAMESPACE` | `hami-system` | (`--vgpu`) HAMi scheduler + biren-mode-manager namespace |
+| `HELM_VERSION` | `v3.14.4` | (`--vgpu`) helm version auto-downloaded via proxy if missing |
+| `KUBE_SCHED_TAG` | _(auto)_ | (`--vgpu`) kube-scheduler sidecar tag; defaults to the API server version |
 
 ### Preparing packages/biren/
 

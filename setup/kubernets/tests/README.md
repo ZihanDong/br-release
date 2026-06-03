@@ -1,5 +1,27 @@
 # HAMi + Biren SVI — Kubernetes validation
 
+> **两套部署模型，两套校验。**
+>
+> - **统一插件（推荐，当前 `set-node-mode.sh biren --vgpu` 部署的）**：单一
+>   `biren-hami-deviceplugin` + HAMi 调度器 + `biren-mode-manager`，同时调度
+>   **整卡 + SVI(1/2、1/4) + vGPU 软切分**。两个校验入口：
+>   ```bash
+>   # 自包含测例（版本受控），直接复用 ../templates 下的 Pod 模板：
+>   sudo NODE=<gpu-node> [TEST_IMAGE=<已存在镜像>] bash test-unified-plugin.sh all   # whole|svi|vgpu
+>   # 安装包内置的深度测试（含多卡 NUMA 拓扑、vGPU 共享等），需 packages/hami-biren 已填充：
+>   sudo NODE=<gpu-node> bash run-hami-bundle-tests.sh all
+>   ```
+>   模板位于 `../templates/`：`biren-whole-gpu.yaml`、`biren-svi-half.yaml`、
+>   `biren-svi-quarter.yaml`、`biren-vgpu.yaml`（均设 `schedulerName: hami-scheduler`，
+>   可直接 `kubectl apply`）。`TEST_IMAGE` 须已存在于 GPU 节点（IfNotPresent）。
+>
+> - **旧版 overlay 模型（本目录其余脚本）**：在原厂整卡插件之上叠加 HAMi-br
+>   仅做 SVI 放置（`deploy-hami.sh`、`register-biren-nodes.sh`、`run-svi-tests.sh`、
+>   `vgpu-reclaim-test.sh`，依赖已废弃的 `packages/hami-br`）。`set-node-mode.sh --vgpu`
+>   **已不再部署该模型**——这些脚本仅作历史参考/驱动级 `suvs` 算力验证保留。
+
+下文描述的是**旧版 overlay 模型**。
+
 Validates that **HAMi-br** can schedule and manage **Biren SVI** (Scalable
 Virtualization Interface) hardware-partitioned vGPUs in Kubernetes, at **1/2**
 and **1/4** granularity, and that a basic `suvs` compute test runs on each

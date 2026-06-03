@@ -1,0 +1,31 @@
+# 整卡（whole-card）—— HAMi-Biren 统一插件
+#
+# 申请一块或多块完整壁仞 GPU（birentech.com/gpu）。多卡时调度器拓扑感知，尽量
+# 把多卡放在同一 NUMA 组（每节点的卡/NUMA 布局有限时取最优）。
+#
+# 前提：节点已 `set-node-mode.sh biren --vgpu`（部署 HAMi 统一插件）。
+# 要点：
+#   · 本部署未启用 admission webhook，必须显式指定 schedulerName: hami-scheduler；
+#   · 无需 runtimeClassName —— 设备由 biren-hami-deviceplugin 的 Allocate 直接注入
+#     (/dev/biren/card_N + BR_PHY_CARDS)；
+#   · image 须已存在于 GPU 节点（IfNotPresent，不走 registry 拉取），可换成自带 SUPA
+#     的推理镜像以便容器内运行 brsmi。
+#
+#   kubectl apply -f biren-whole-gpu.yaml
+#   kubectl logs biren-whole-gpu        # BR_PHY_CARDS=card_0[,card_1,...]
+#   kubectl delete -f biren-whole-gpu.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: biren-whole-gpu
+  namespace: default
+spec:
+  schedulerName: hami-scheduler
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: ubuntu:22.04
+      command: ["sh", "-c", "echo BR_PHY_CARDS=$BR_PHY_CARDS && sleep 3600"]
+      resources:
+        limits:
+          birentech.com/gpu: "1"   # 申请整卡数量；多卡改为 "2"/"4" 等

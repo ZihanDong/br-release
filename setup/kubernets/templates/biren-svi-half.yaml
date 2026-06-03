@@ -1,0 +1,28 @@
+# SVI 硬切分 1/2（half-GPU）—— HAMi-Biren 统一插件
+#
+# 申请一个 1/2 SVI 实例（birentech.com/1-2-gpu，166C 上约 32GB）。SVI 是硬件隔离的
+# 独占实例，无显存/算力超卖。集群中若没有空闲 1/2 实例，biren-mode-manager 会把一张
+# 空闲整卡按需切成 MODE1（`brsmi gpu set -s 1`），Pod 随后调度到新实例上；实例空闲后
+# 自动回收为整卡。首次冷切分约 2 分钟。
+#
+# 前提：节点已 `set-node-mode.sh biren --vgpu`。
+#   kubectl apply -f biren-svi-half.yaml
+#   kubectl logs biren-svi-half         # BR_PHY_CARDS=card_N
+#   kubectl delete -f biren-svi-half.yaml   # 释放后整卡自动回收
+apiVersion: v1
+kind: Pod
+metadata:
+  name: biren-svi-half
+  namespace: default
+spec:
+  schedulerName: hami-scheduler
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: ubuntu:22.04
+      command: ["sh", "-c", "echo BR_PHY_CARDS=$BR_PHY_CARDS && sleep 3600"]
+      resources:
+        limits:
+          # 一个 1/2 SVI 实例。每实例显存（约 32GB）由 SVI 模式（资源名）固定，
+          # 无单独的显存请求。
+          birentech.com/1-2-gpu: "1"

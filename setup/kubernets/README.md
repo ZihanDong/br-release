@@ -40,10 +40,56 @@ setup/kubernets/
 │   ├── registry_clean.sh   # 清除 Registry 全部资源和数据
 │   ├── registry.conf       # Registry 部署配置（存储路径、端口等）
 │   └── images.conf         # 镜像路径配置（命名空间定义，供 update_images.sh 使用）
+├── templates/              # GPU 工作负载 Pod 模板（整卡 / SVI / vGPU）
+│   ├── biren-whole-gpu.yaml    # 整卡 birentech.com/gpu（HAMi 统一插件）
+│   ├── biren-svi-half.yaml     # SVI 1/2 birentech.com/1-2-gpu
+│   ├── biren-svi-quarter.yaml  # SVI 1/4 birentech.com/1-4-gpu
+│   ├── biren-vgpu.yaml         # vGPU 软切分 birentech.com/vgpu(+cores/+memory)
+│   ├── gpu-test-pod.yaml       # 整卡测试 Pod（原厂插件 / plain biren）
+│   └── vgpu-test-pod.yaml      # 旧版 overlay SVI 测试 Pod（legacy）
+├── tests/                  # 调度功能校验（见 tests/README.md）
+│   ├── test-unified-plugin.sh  # 统一插件自包含测例：整卡 / SVI / vGPU
+│   └── run-hami-bundle-tests.sh# 调用安装包内 test/run-tests.sh 的深度测试
+├── CHEATSHEET.md           # 常用命令速查
 └── SCENARIOS.md            # 典型配置场景（单节点、多节点、清除重置等）
 ```
 
 **`install.sh` 会根据 `/etc/os-release` 自动检测 OS，并 source 对应的 `-ubuntu` 或 `-kylin` lib 文件。**
+
+---
+
+## 前置条件：安装包准备
+
+整个 `packages/` 目录已被根 `.gitignore` 排除（含大体积镜像 / KMD），**使用前需从发布包
+手动填充**。按使用路径准备对应安装包：
+
+| 路径 | 用于 | 需放入的文件 | 来源 |
+|------|------|--------------|------|
+| `packages/biren/` | `set-node-mode.sh biren`、`join.sh biren`（原厂整卡插件，仅整卡） | `k8s_device_plugin_*.tar`（设备插件镜像，发布包内层 tar）+ `biren-device-plugin.yaml`（DaemonSet） | 发布包 `images/k8s_device_plugin_*.tar.gz` 解压 |
+| `packages/hami-biren/` | `set-node-mode.sh biren --vgpu`（HAMi 统一插件：整卡 + SVI + vGPU） | 整个 `hami_br_deploy` 安装包：`images/`（2 个镜像 tar）、`chart/`（Helm chart + values）、`deploy/`（设备插件 DaemonSet）、`kmd/`（`biren.ko` 1.12.0 + `br_vgpu_tool`） | `cp -a /path/to/hami_br_deploy/. packages/hami-biren/` |
+
+填充示例：
+```bash
+# 1) 原厂整卡插件（plain biren）
+gunzip -c /data/release/<version>/images/k8s_device_plugin_*.tar.gz \
+    | tar -xf - -C packages/biren/
+
+# 2) HAMi 统一插件（--vgpu）
+cp -a /home/<user>/hami_br_deploy/. packages/hami-biren/
+```
+
+各路径的详细内容与说明见 `packages/README.md`。其它前置条件：
+
+- **k8s 基础环境**：先用 `install.sh` + `master.sh`/`join.sh` 装好集群（国内 / Kylin 需传
+  `REGISTRY_MIRROR=registry.aliyuncs.com/google_containers`，见 SCENARIOS.md）。
+- **壁仞驱动**：每个 GPU 节点已装 BIRENSUPA 驱动 + BRML（默认
+  `/usr/local/birensupa/driver/biren-smi/`，`brsmi` 可用）。整卡 / SVI 用现有驱动即可。
+- **vGPU 软切分**：节点需加载与内核匹配的 **1.12.0 KMD**（`packages/hami-biren/kmd/biren.ko`，
+  管理员手动 `insmod`；`insmod` 重启失效，需重新加载或打包 DKMS）。`set-node-mode.sh --vgpu`
+  会在缺 `helm` 时经 `https_proxy` 自动下载，并自动把 HAMi 内置 kube-scheduler 镜像对齐到
+  集群 k8s 版本（复用已缓存的 `registry.aliyuncs.com/google_containers/kube-scheduler:v<版本>`）。
+- **多节点**：远端节点的镜像导入 / `br_vgpu_tool` 安装由脚本经免密 `ssh + sudo` 自动完成
+  （以发起 `sudo` 的用户身份连接，复用其 `~/.ssh/config`）；不可用时脚本打印手动命令。
 
 ---
 
@@ -207,24 +253,26 @@ sudo ./join.sh biren
 sudo ./set-node-mode.sh <mode> [节点名1,节点名2,...]
 ```
 
-**三种模式：**
+**三种模式 + 一个开关：**
 
 | 模式 | 效果 |
 |------|------|
 | `cpu` | 去除 control-plane 污点，节点以纯 CPU 算力参与调度 |
-| `biren` | 去除污点 + 打 `birentech.com=gpu` 标签 + 部署 device plugin DaemonSet |
+| `biren` | 去除污点 + 打 `birentech.com=gpu` 标签 + 部署原厂整卡 device plugin（仅整卡调度） |
+| `biren --vgpu` | 部署 **HAMi-Biren 统一插件**，取代原厂整卡插件，同一套插件同时调度整卡 + SVI + vGPU |
 | `none` | 恢复 `control-plane:NoSchedule` 污点，退出调度池 |
 
 **用法示例：**
 
 ```bash
-sudo ./set-node-mode.sh biren               # 本机切换为 GPU 节点
+sudo ./set-node-mode.sh biren               # 本机切换为 GPU 节点（原厂整卡插件）
+sudo ./set-node-mode.sh biren --vgpu        # 本机切换为 GPU 节点（HAMi 统一插件：整卡+SVI+vGPU）
 sudo ./set-node-mode.sh cpu                 # 本机切换为 CPU 节点
 sudo ./set-node-mode.sh none                # 恢复隔离
-sudo ./set-node-mode.sh biren node1,node2   # 批量设置
+sudo ./set-node-mode.sh biren --vgpu node1,node2  # 批量部署统一插件
 ```
 
-**BirenTech device plugin 准备：**
+**原厂整卡 device plugin 准备（plain `biren`）：**
 
 `packages/biren/` 目录需包含：
 - `*.tar` — 设备插件镜像（从发布包中的 `k8s_device_plugin_*.tar.gz` 解压获取内层 tar）
@@ -236,6 +284,48 @@ gunzip -c /data/release/<version>/images/k8s_device_plugin_*.tar.gz \
     | tar -xf - -C packages/biren/
 # 或直接解压 .tar.gz（外层为 wrapper，内含同名 .tar）
 ```
+
+#### `--vgpu` —— HAMi-Biren 统一插件（整卡 + SVI + vGPU）
+
+`biren --vgpu` 用 `biren-hami-deviceplugin` **取代**原厂整卡插件，并通过 Helm
+安装 HAMi 调度器 + `biren-mode-manager`（按需动态切分 / 空闲回收），让节点用**同一套
+插件**同时调度三种形态的壁仞 GPU 资源：
+
+| 资源 | 形态 | 说明 |
+|------|------|------|
+| `birentech.com/gpu` | 整卡 | 单卡 / 多卡，拓扑感知（多卡尽量同 NUMA） |
+| `birentech.com/1-2-gpu`、`birentech.com/1-4-gpu` | SVI 硬切分 | 由 mode-manager 把整卡按需切成 1/2、1/4，空闲回收为整卡 |
+| `birentech.com/vgpu` + `vgpu-cores` + `vgpu-memory` | vGPU 软切分 | 多 Pod 共享一张卡，HAMi 按算力(SPC)+显存(MB) bin-pack |
+
+要点：
+- **取代关系**：同一资源名只能由一个插件向 kubelet 注册，脚本会先删除原厂
+  `biren-device-plugin-daemonset` 再部署统一插件。两者不可在同一节点共存。
+- **Pod 调度**：本部署不启用 admission webhook，工作负载 Pod 须显式设置
+  `schedulerName: hami-scheduler`（示例见 `packages/hami-biren/examples/`）。
+  无需 `runtimeClassName`，设备由插件 Allocate 直接注入。
+- **整卡 / SVI** 用现有壁仞驱动即可；**vGPU 软切分**额外需要节点加载与内核匹配的
+  **1.12.0 KMD**（`packages/hami-biren/kmd/biren.ko`，由管理员手动 `insmod`）。未加载
+  时脚本会告警，整卡 / SVI 不受影响，仅 vGPU 暂不可用。
+- **依赖**：脚本会在缺少 `helm` 时经 `https_proxy` 自动下载安装；HAMi 调度器内置的
+  kube-scheduler sidecar 镜像默认复用集群已缓存的
+  `registry.aliyuncs.com/google_containers/kube-scheduler:v<集群版本>`（自动探测）。
+- **安装包**：来自 `HAMI_BUNDLE_DIR`（默认 `packages/hami-biren/`，含 `images/`
+  `chart/` `deploy/` `kmd/`，见 `packages/README.md`）。该目录被 `.gitignore` 排除。
+- **多节点**：本机直接准备，远端节点经免密 `ssh + sudo` 自动导入镜像 / 安装
+  `br_vgpu_tool`；若免密 sudo 不可用，脚本会打印需在该节点手动执行的命令。
+
+申请各形态资源的 Pod 模板见 `templates/`（`biren-whole-gpu.yaml`、`biren-svi-half.yaml`、
+`biren-svi-quarter.yaml`、`biren-vgpu.yaml`，均设 `schedulerName: hami-scheduler`，可直接
+`kubectl apply`）。验证（见 `tests/`）：
+```bash
+# 自包含测例（版本受控，复用 templates/）：
+sudo NODE=<gpu-node> [TEST_IMAGE=<已存在镜像>] bash tests/test-unified-plugin.sh all  # whole|svi|vgpu
+# 安装包内置深度测试（多卡 NUMA、vGPU 共享等，需 packages/hami-biren 已填充）：
+sudo NODE=<gpu-node> bash tests/run-hami-bundle-tests.sh all
+```
+
+完整卸载：`helm -n hami-system uninstall hami` 后用 `set-node-mode.sh biren`
+重新部署原厂整卡插件即可。
 
 **与 join.sh biren 的区别：**
 - `join.sh biren` — 用于**首次**加入集群时设置为 GPU 节点
