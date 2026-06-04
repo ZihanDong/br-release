@@ -88,8 +88,17 @@ cp -a /home/<user>/hami_br_deploy/. packages/hami-biren/
   管理员手动 `insmod`；`insmod` 重启失效，需重新加载或打包 DKMS）。`set-node-mode.sh --vgpu`
   会在缺 `helm` 时经 `https_proxy` 自动下载，并自动把 HAMi 内置 kube-scheduler 镜像对齐到
   集群 k8s 版本（复用已缓存的 `registry.aliyuncs.com/google_containers/kube-scheduler:v<版本>`）。
+  - **`br_vgpu_tool` 与宿主机 glibc**：安装包预编译的 `br_vgpu_tool` 需 glibc ≥ 2.34；
+    Kylin V10 宿主 glibc 为 2.28，直接在宿主运行会报 `GLIBC_2.34 not found`。需用节点上的
+    Kylin 源码重编（如 `kmd/kylin-x86_64-4.19.90/src/docs/tools`，`make` 即可，gcc 7.3 + glibc 2.28），
+    再 `install -m0755 br_vgpu_tool /usr/local/bin/`，并替换 `packages/hami-biren/kmd/br_vgpu_tool`。
+    注：vGPU 切分本身不受影响 —— `biren-mode-manager` 在其 Ubuntu 容器内运行该工具；只有宿主级
+    诊断 / 测试脚本的驱动级检查需要可在宿主运行的版本。
 - **多节点**：远端节点的镜像导入 / `br_vgpu_tool` 安装由脚本经免密 `ssh + sudo` 自动完成
   （以发起 `sudo` 的用户身份连接，复用其 `~/.ssh/config`）；不可用时脚本打印手动命令。
+- **绑定到某节点做验证**：用 Pod 的 `nodeSelector`（测试脚本的 `PIN_NODE=1`），**不要用
+  `kubectl cordon`** —— cordon 会让 HAMi extender 把该节点视为不可用，进而无法在集群其余
+  可调度节点上动态切分 SVI/vGPU，导致 Pod 一直 Pending。
 
 ---
 
