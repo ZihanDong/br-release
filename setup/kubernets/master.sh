@@ -287,9 +287,10 @@ print_summary() {
     log_info "  → 或直接使用 join.sh 脚本（自动读取该文件）"
     echo
     log_info "节点算力角色切换（初始为 control-plane 隔离状态）："
-    log_info "  纯 CPU 节点  : sudo ./set-node-mode.sh cpu"
-    log_info "  BirenTech GPU: sudo ./set-node-mode.sh biren"
-    log_info "  恢复隔离     : sudo ./set-node-mode.sh none"
+    log_info "  纯 CPU 节点      : sudo ./set-node-mode.sh cpu"
+    log_info "  GPU（原厂整卡）  : sudo ./set-node-mode.sh biren"
+    log_info "  GPU（HAMi 统一） : sudo ./set-node-mode.sh biren --vgpu   # 整卡+SVI+vGPU"
+    log_info "  恢复隔离         : sudo ./set-node-mode.sh none"
     echo
     log_info "后续常用命令："
     log_info "  查看节点状态  : kubectl get nodes -o wide"

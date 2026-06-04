@@ -46,13 +46,18 @@ scp /root/k8s-join.sh worker01:/root/k8s-join.sh
 
 # === 在 Worker 节点执行 ===
 sudo REGISTRY_MIRROR=registry.aliyuncs.com/google_containers ./install.sh
-sudo ./join.sh biren                  # 以 GPU 节点加入
+sudo ./join.sh biren                  # 以 GPU 节点加入（原厂整卡插件）
+#   若要用 HAMi 统一插件（整卡+SVI+vGPU）：这里改用 `sudo ./join.sh worker`，
+#   插件部署留到下面在 Master 上用 set-node-mode.sh biren --vgpu 统一完成。
 
 # === 在 Master 节点执行（部署 Registry，推送镜像，分发信任）===
 sudo ./registry/setup-registry.sh
 # vi ./registry/images.conf
 sudo ./registry/update_images.sh add
 sudo ./registry/registry-trust.sh apply worker01,worker02
+
+# === HAMi 统一插件（可选，整卡+SVI+vGPU）：在 Master 上一次性部署到所有 GPU 节点 ===
+sudo ./set-node-mode.sh biren --vgpu master,worker01,worker02
 ```
 
 ---

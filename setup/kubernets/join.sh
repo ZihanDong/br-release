@@ -7,7 +7,13 @@
 # mode 可选值：
 #   worker  加入为标准 worker 节点，参与 CPU 调度（默认）
 #   cpu     同 worker，明确声明为纯 CPU 算力节点
-#   biren   加入为 BirenTech GPU 算力节点，自动导入 device plugin 镜像并打 GPU 标签
+#   biren   加入为 BirenTech GPU 算力节点（原厂整卡 device plugin），自动导入插件镜像并打 GPU 标签
+#
+# 关于 HAMi 统一插件（整卡 + SVI + vGPU）：
+#   join.sh biren 只部署原厂整卡插件（仅整卡调度）。要让节点用统一插件同时调度整卡/SVI/vGPU，
+#   先 `join.sh worker`（或 biren）把节点加入，再在 **Master** 上执行
+#   `set-node-mode.sh biren --vgpu <节点>`——该命令是集群级操作（Helm 安装 HAMi + 经 SSH 向各节点
+#   导入镜像/安装 br_vgpu_tool），无法在 worker 本机完成，故不作为 join.sh 的一个模式。
 #
 # Join 参数来源（三种方式按优先级自动选择）：
 #   方式一：JOIN_FILE 文件（默认 /root/k8s-join.sh，由 master.sh 生成）
@@ -245,7 +251,8 @@ apply_biren_role() {
     else
         log_warn "跳过 DaemonSet 部署（无 admin.conf）。"
         log_warn "请在 Master 上执行以下命令完成首次 DaemonSet 部署："
-        log_warn "  sudo bash set-node-mode.sh biren ${node_name}"
+        log_warn "  sudo bash set-node-mode.sh biren ${node_name}            # 原厂整卡插件"
+        log_warn "  sudo bash set-node-mode.sh biren --vgpu ${node_name}     # HAMi 统一插件（整卡+SVI+vGPU）"
         DAEMONSET_DEPLOYED=false
     fi
 }
