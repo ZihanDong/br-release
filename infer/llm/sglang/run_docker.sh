@@ -2,7 +2,7 @@
 # Launch a BirenTech Docker container for SGLang serving.
 #
 # Usage:
-#   sudo bash run_docker.sh [--run] <config_file>
+#   sudo bash run_docker.sh [--run] <config_ref>
 #
 #   (default)  Start the container, write a server run script to the log
 #              directory, then enter an interactive shell there.  The user
@@ -12,20 +12,21 @@
 #              interactive shell).  Polls /health and prints test commands
 #              once the server is ready.
 #
-# config_file may be:
-#   - a bare model name: qwen3-vl-32b  (resolved to configs/qwen3-vl-32b.conf)
-#   - a relative path:   configs/qwen3-vl-32b.conf
-#   - an absolute path:  /path/to/any.conf
+# config_ref is resolved by utils/parse_config.sh:
+#   - a bare model name:  qwen3-vl-32b   (-> configs/sglang_qwen3-vl-32b.conf)
+#   - a prefixed name:    sglang_qwen3-vl-32b
+#   - a path under configs/ or an absolute path
+# The config's framework= field must be 'sglang'.
 #
-# /home and /data are bind-mounted so sglang_server.sh, model weights, and
-# configs are accessible at the same paths inside the container.
+# /home and /data are bind-mounted so sglang_server.sh, the unified parser,
+# model weights, and configs are accessible at the same paths inside the container.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LLM_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-_REGISTRY_SH="${SCRIPT_DIR}/../model_registry.sh"
 LOG_DIR="${SCRIPT_DIR}/logs"
 CONTAINER_IMAGE='birensupa-smartinfer-sglang:26.04.rc2-py310-pt2.9.0-br1xx'
 
@@ -34,6 +35,10 @@ _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
 _ok()   { echo -e "\033[1;32m[ OK ]\033[0m  $*"; }
 _warn() { echo -e "\033[0;33m[WARN]\033[0m  $*"; }
 _err()  { echo -e "\033[0;31m[ERR ]\033[0m  $*" >&2; }
+
+# parse_config.sh provides parse_config + port_in_use/ensure_dir helpers.
+# shellcheck source=../utils/parse_config.sh
+source "${LLM_DIR}/utils/parse_config.sh"
 
 DOCKER_CMD="docker"
 if ! docker info &>/dev/null 2>&1; then
@@ -47,13 +52,13 @@ fi
 
 usage() {
     echo ""
-    echo "Usage: $0 [--run] <config_file>"
+    echo "Usage: $0 [--run] <config_ref>"
     echo ""
     echo "  (default)  Enter interactive shell; start server manually inside"
     echo "  --run      Write run script then exec server directly (no interactive shell)"
     echo ""
-    echo "Available configs:"
-    for f in "${SCRIPT_DIR}/configs/"*.conf; do
+    echo "Available SGLang configs:"
+    for f in "${LLM_DIR}/configs/"sglang_*.conf; do
         [[ -f "$f" ]] && echo "  $(basename "$f" .conf)"
     done
     echo ""
@@ -74,54 +79,26 @@ done
 
 [[ -z "$CONFIG_ARG" ]] && { _err "A config file is required."; usage; }
 
-# ── Resolve config ─────────────────────────────────────────────────────────────
-CONFIG_FILE=""
-
-if [[ "$CONFIG_ARG" == /* ]]; then
-    CONFIG_FILE="$CONFIG_ARG"
-elif [[ -f "${SCRIPT_DIR}/configs/${CONFIG_ARG}.conf" ]]; then
-    CONFIG_FILE="${SCRIPT_DIR}/configs/${CONFIG_ARG}.conf"
-elif [[ -f "${SCRIPT_DIR}/${CONFIG_ARG}" ]]; then
-    CONFIG_FILE="${SCRIPT_DIR}/${CONFIG_ARG}"
-elif [[ -f "${CONFIG_ARG}" ]]; then
-    CONFIG_FILE="${CONFIG_ARG}"
-fi
-
-[[ -z "$CONFIG_FILE" || ! -f "$CONFIG_FILE" ]] && {
-    _err "Config not found: $CONFIG_ARG"; usage; }
-
-# ── Load config ────────────────────────────────────────────────────────────────
-# Required params have NO defaults and MUST be set in the config file:
-#   model_weights, port, tensor_parallel_size, pipeline_parallel_size,
-#   max_model_len, max_running_requests
-served_model_name=""
-mem_fraction_static=0.85
-page_size=128
-disable_radix_cache=false
-trust_remote_code=false
-extra_env=""
-extra_sglang_args=""
-
-# shellcheck source=/dev/null
-source "$CONFIG_FILE"
-
-_missing=()
-[[ -z "${model_weights:-}" ]]         && _missing+=(model_weights)
-[[ -z "${port:-}" ]]                   && _missing+=(port)
-[[ -z "${tensor_parallel_size:-}" ]]   && _missing+=(tensor_parallel_size)
-[[ -z "${pipeline_parallel_size:-}" ]] && _missing+=(pipeline_parallel_size)
-[[ -z "${max_model_len:-}" ]]          && _missing+=(max_model_len)
-[[ -z "${max_running_requests:-}" ]]   && _missing+=(max_running_requests)
-[[ ${#_missing[@]} -gt 0 ]] && {
-    _err "Required params not set in $(basename "$CONFIG_FILE"): ${_missing[*]}"; exit 1; }
+# ── Load + validate config (framework must be sglang; defaults filled) ─────────
+parse_config "$CONFIG_ARG" sglang || usage
+[[ -n "${docker_image:-}" ]] && CONTAINER_IMAGE="$docker_image"
 
 _info "Config      : $(basename "$CONFIG_FILE")  [mode=$( $RUN_MODE && echo --run || echo interactive)]"
-_info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
+if [[ "${launch_mode}" == "multimodal_gen" ]]; then
+    _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  [multimodal_gen]"
+else
+    _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
+fi
+
+# ── Host port availability (server runs with --net host) ───────────────────────
+if port_in_use "$port"; then
+    _err "Port ${port} is already in use on this host (--net host)."
+    _err "Stop the conflicting process or change 'port' in $(basename "$CONFIG_FILE")."; exit 1
+fi
 
 # ── Registry lookup (via model_registry.sh) ───────────────────────────────────
-[[ ! -f "$_REGISTRY_SH" ]] && { _err "model_registry.sh not found: $_REGISTRY_SH"; exit 1; }
 # shellcheck source=../model_registry.sh
-source "$_REGISTRY_SH"
+source "${LLM_DIR}/model_registry.sh"
 parse_model "$model_weights" || exit 1
 
 _info "Registry    : path=$MODEL_PATH  download=$DOWNLOAD_NAME  status=$DIR_STATUS"
@@ -152,7 +129,11 @@ else
 fi
 
 # ── GPU selection ──────────────────────────────────────────────────────────────
-gpu_needed=$((tensor_parallel_size * pipeline_parallel_size))
+if [[ "${launch_mode}" == "multimodal_gen" ]]; then
+    gpu_needed=$tensor_parallel_size
+else
+    gpu_needed=$((tensor_parallel_size * pipeline_parallel_size))
+fi
 _info "GPU needed  : tp=$tensor_parallel_size × pp=$pipeline_parallel_size = $gpu_needed"
 
 mapfile -t free_gpus < <(
@@ -178,7 +159,7 @@ for idx in "${free_gpus[@]}"; do
 done
 
 # ── Container setup ────────────────────────────────────────────────────────────
-mkdir -p "$LOG_DIR"
+ensure_dir "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 LOG_FILE="${LOG_DIR}/sglang_${model_weights}_${TIMESTAMP}.log"
 CONTAINER_NAME="sglang_${model_weights}"
@@ -190,6 +171,7 @@ if $DOCKER_CMD inspect "$CONTAINER_NAME" &>/dev/null; then
 fi
 
 _info "Container   : $CONTAINER_NAME"
+_info "Image       : $CONTAINER_IMAGE"
 _info "Log dir     : $LOG_DIR"
 echo ""
 

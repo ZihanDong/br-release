@@ -1,11 +1,16 @@
 # vLLM Server — BirenTech GPU 部署指南
 
+> 统一布局总览见 [`../README.md`](../README.md)。模型配置集中在 `../configs/vllm_*.conf`
+> （首行 `framework=vllm`），由 `../utils/parse_config.sh` 统一解析校验；k8s YAML 生成/应用用
+> 跨框架的 `../utils/k8s_yaml_gen.sh` 和 `../utils/k8s_apply.sh`，产物落到 `../configs/{pod,deploy}/`。
+> 本文档只讲 vLLM 专属内容。
+
 本目录提供两种方式在 BirenTech GPU 节点上拉起 vLLM OpenAI 兼容推理服务：
 
 | 方式 | 脚本 | 适用场景 |
 |------|------|---------|
 | **Docker** | `run_docker.sh` | 快速调试、单次运行 |
-| **Kubernetes** | `k8s_yaml_gen.sh` + `k8s_apply.sh` | 生产部署、持久运行 |
+| **Kubernetes** | `../utils/k8s_yaml_gen.sh` + `../utils/k8s_apply.sh` | 生产部署、持久运行 |
 
 ---
 
@@ -48,24 +53,22 @@
 ```
 infer/llm/
 ├── model_registry.conf   # 模型库：本地路径 + HuggingFace/ModelScope ID（多框架共享）
+├── configs/              # 统一模型配置（多框架共享）+ 生成的 k8s YAML
+│   ├── vllm_bge-m3.conf       # bge-m3（embedding，端口 28800，k8s NodePort 30800）
+│   ├── vllm_qwen3-32b.conf    # Qwen3-32B（chat，端口 28800，k8s NodePort 30801）
+│   ├── vllm_qwen3-vl-32b.conf # Qwen3-VL-32B（VL chat，端口 28802，k8s NodePort 30803）
+│   ├── vllm_minimax-m2.5.conf # MiniMax M2.5（chat MoE，INT8，端口 20027，k8s NodePort 30802）
+│   ├── pod/  deploy/          # k8s_yaml_gen.sh 产物
+├── utils/                # 跨框架工具：parse_config.sh / k8s_yaml_gen.sh / k8s_apply.sh / conf_gen.sh
 └── vllm/
-    ├── vllm_server.sh        # 容器内脚本：加载 conf → 查 registry → exec vllm
-    ├── run_docker.sh         # Docker 外层：GPU 选择 + 容器启动；默认交互式，--run 直接拉起 server
-    ├── k8s_yaml_gen.sh       # k8s YAML 生成器：--task pod|deploy，输出 YAML 到 k8s_yaml_gen/
-    ├── k8s_apply.sh          # k8s 部署：apply YAML；deploy 自动测试，pod 进入交互式 shell
-    ├── configs/
-    │   ├── bge-m3.conf         # bge-m3（embedding，端口 28800，k8s NodePort 30800）
-    │   ├── qwen3-32b.conf      # Qwen3-32B（chat，端口 28800，k8s NodePort 30801）
-    │   └── minimax-m2.5.conf   # MiniMax M2.5（chat MoE，INT8，端口 20027，k8s NodePort 30802）
+    ├── vllm_server.sh        # 容器内脚本：parse_config → 查 registry → exec vllm
+    ├── run_docker.sh         # Docker 外层：GPU 选择 + 端口检查 + 容器启动；默认交互式，--run 直接拉起 server
+    ├── vllm_server_pd.sh proxy_server.sh proxy_conf/ configs/   # PD 分离部署（独立，未纳入统一体系）
     ├── quant/                # 权重量化工具
     │   ├── run_quant.sh        # 一键量化：FP8 → BF16 → INT8（在 BirenTech 容器内运行）
     │   ├── cast_fp8_bf16.py    # Stage 1：FP8 safetensors → BF16（单进程 CPU）
     │   ├── convert_int8_cpu.py # Stage 2：BF16 → INT8 packed（单进程 CPU，shard index 驱动）
     │   └── utils.py            # 量化辅助函数
-    ├── k8s_yaml_gen/         # 生成的 k8s YAML（临时文件，可按需修改后应用）
-    │   ├── bge-m3-deploy.yaml       # Deployment + Service
-    │   ├── bge-m3-pod.yaml          # Pod（交互式调试）
-    │   └── qwen3-32b-deploy.yaml
     └── logs/                 # 启动 / 量化日志（自动生成）
 ```
 
@@ -174,19 +177,13 @@ curl -s http://127.0.0.1:20027/v1/chat/completions \
 | biren device plugin | DaemonSet 运行中（`biren-gpu` namespace） |
 | 私有 Registry | `172.25.198.36:32000`（镜像已导入） |
 
-**RuntimeClass 注册**：`join.sh biren` 和 `set-node-mode.sh biren` 会自动完成，通常无需手动执行。若需手动创建：
+**RuntimeClass 注册**：`join.sh biren` / `set-node-mode.sh biren --vgpu` 会自动完成，通常无需手动执行。
 
-```bash
-kubectl apply -f - << 'EOF'
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: biren
-handler: runc
-EOF
-```
-
-> **注意：** RuntimeClass 使用 `handler: runc`（标准 runc），GPU 设备访问通过 `privileged: true` + `BIREN_VISIBLE_DEVICES` 环境变量实现，SDK 库路径通过 `biren-driver` hostPath volume（`/usr/local/birensupa/driver`）挂载提供——`k8s_yaml_gen.sh` 自动将这三项写入生成的 YAML。
+> **注意：** 生成的 YAML 使用 `runtimeClassName: biren`（handler `biren`，由 biren-container-runtime
+> 注入 `/dev/biren-m` 与分配到的 `/dev/biren/card_N`，**无需** privileged 或硬编码
+> `BIREN_VISIBLE_DEVICES`）；GPU 由 `birentech.com/gpu` 等资源请求 + `schedulerName: hami-scheduler`
+> 分配；SDK 库路径通过 `biren-driver` hostPath volume（`/usr/local/birensupa/driver`）提供。
+> 这些 `../utils/k8s_yaml_gen.sh` 都会自动写入。
 
 ### 2.2 两种任务类型
 
@@ -197,54 +194,56 @@ EOF
 
 ### 2.3 典型工作流
 
+> 统一生成器需要一个 GPU 资源模式（`--gpu` / `--svi` / `--vgpu-core+--vgpu-mem`，见 `../README.md`）。
+> 配置用 `vllm_<model>`（裸名也行，生成器经 parser 自动定位 `../configs/vllm_<model>.conf`）。
+
 **Deployment 方式（生产推荐）：**
 
 ```bash
-cd infer/llm/vllm
+cd infer/llm
 
-# Step 1：生成 YAML
-bash k8s_yaml_gen.sh --task deploy bge-m3
-# → 保存到 k8s_yaml_gen/bge-m3-deploy.yaml
+# Step 1：生成 YAML（整卡模式）
+bash utils/k8s_yaml_gen.sh --task deploy --gpu vllm_bge-m3
+# → 保存到 configs/deploy/vllm_bge-m3-deploy-p28800-r1.yaml
 
 # Step 2：（可选）查看 / 修改 YAML
-cat k8s_yaml_gen/bge-m3-deploy.yaml
+cat configs/deploy/vllm_bge-m3-deploy-p28800-r1.yaml
 
 # Step 3：部署并自动测试 API
-bash k8s_apply.sh k8s_yaml_gen/bge-m3-deploy.yaml
+bash utils/k8s_apply.sh configs/deploy/vllm_bge-m3-deploy-p28800-r1.yaml
 ```
 
 **Pod 方式（调试 / 手动控制）：**
 
 ```bash
-bash k8s_yaml_gen.sh --task pod bge-m3
-# → 保存到 k8s_yaml_gen/bge-m3-pod.yaml
+bash utils/k8s_yaml_gen.sh --task pod --gpu vllm_bge-m3
+# → 保存到 configs/pod/vllm_bge-m3-pod-p28800.yaml
 
-bash k8s_apply.sh k8s_yaml_gen/bge-m3-pod.yaml [/my/log/dir]
-# → 等待 Pod Running，写入 run_vllm_bge-m3_server.sh，进入 pod 交互式 shell
-# 在 shell 内执行：
-# bash run_vllm_bge-m3_server.sh
+bash utils/k8s_apply.sh configs/pod/vllm_bge-m3-pod-p28800.yaml [/my/log/dir]
+# → 等待 Pod Running，写入 run_vllm_bge-m3_server.sh，进入 pod 交互式 shell；在 shell 内执行：
+#   bash run_vllm_bge-m3_server.sh
 ```
 
 多模型同时部署（NodePort 不同，互不冲突）：
 
 ```bash
-bash k8s_yaml_gen.sh --task deploy bge-m3    && bash k8s_apply.sh k8s_yaml_gen/bge-m3-deploy.yaml
-bash k8s_yaml_gen.sh --task deploy qwen3-32b && bash k8s_apply.sh k8s_yaml_gen/qwen3-32b-deploy.yaml
+bash utils/k8s_yaml_gen.sh --task deploy --gpu vllm_bge-m3    && bash utils/k8s_apply.sh configs/deploy/vllm_bge-m3-deploy-p28800-r1.yaml
+bash utils/k8s_yaml_gen.sh --task deploy --gpu vllm_qwen3-32b && bash utils/k8s_apply.sh configs/deploy/vllm_qwen3-32b-deploy-p28800-r1.yaml
 ```
 
 ### 2.4 `k8s_yaml_gen.sh` 行为
 
-- 必须传入 `--task pod|deploy` 参数
-- 加载 conf，查找模型权重（如缺失则询问下载）
-- 自动探测具有足够 GPU 资源的节点（或使用 `k8s_node_name` 指定）
+- 必须传入 `--task pod|deploy` 和一个 GPU 资源模式（`--gpu`/`--svi`/`--vgpu-*`）
+- 经 `parse_config.sh` 加载 conf（校验 framework=vllm），查找模型权重（如缺失则询问下载）
+- 调度：`--node`/`--label`，缺省 `nodeSelector birentech.com=gpu`
 - **deploy**：生成 Namespace + Deployment + Service YAML，包含就绪/存活探针
 - **pod**：生成 Namespace + Pod YAML（`restartPolicy: Never`，args 为 `sleep infinity`，无 Service）
-- 输出文件：`k8s_yaml_gen/<model>-<type>.yaml`，**不执行 apply**
+- 输出文件：`configs/{pod,deploy}/vllm_<model>-<type>[...].yaml`，**不执行 apply**
 
 ### 2.5 `k8s_apply.sh` 行为
 
 - 自动检测 YAML 中的任务类型（Deployment / Pod）
-- 解析 `vllm.io/config-file` 和 `vllm.io/server-script` 注解获取配置路径
+- 解析 `infer.birentech.com/{framework,config-file,server-script}` 注解获取框架与配置路径
 - **deploy**：`kubectl apply`，等待 Pod 变为 Ready，自动 API 测试，打印管理命令
 - **pod**：`kubectl apply`，等待 Pod 变为 Running，写入 run script 到 pod 内，进入交互式 shell
 
@@ -348,21 +347,22 @@ modelscope_id=Qwen/Qwen3-32B
 ```bash
 # 1. 在 infer/llm/model_registry.conf 添加条目
 # 2. 复制并修改 conf 文件
-cp configs/qwen3-32b.conf configs/my-model.conf
-# 修改 model_weights、port、tp/pp、k8s_nodeport
+cp ../configs/vllm_qwen3-32b.conf ../configs/vllm_my-model.conf
+# 修改 framework(=vllm 保持)、model_weights、port、tp/pp、k8s_nodeport
 
 # 3. Docker 启动（交互式）
 sudo bash run_docker.sh my-model
 # 或直接拉起 server：
 sudo bash run_docker.sh --run my-model
 
-# 4. k8s 启动（deploy 方式）
-bash k8s_yaml_gen.sh --task deploy my-model
-bash k8s_apply.sh k8s_yaml_gen/my-model-deploy.yaml
+# 4. k8s 启动（deploy 方式；从 infer/llm 目录）
+cd ..
+bash utils/k8s_yaml_gen.sh --task deploy --gpu vllm_my-model
+bash utils/k8s_apply.sh configs/deploy/vllm_my-model-deploy-p<port>-r1.yaml
 
 # k8s 启动（pod 交互式调试）
-bash k8s_yaml_gen.sh --task pod my-model
-bash k8s_apply.sh k8s_yaml_gen/my-model-pod.yaml
+bash utils/k8s_yaml_gen.sh --task pod --gpu vllm_my-model
+bash utils/k8s_apply.sh configs/pod/vllm_my-model-pod-p<port>.yaml
 ```
 
 ---

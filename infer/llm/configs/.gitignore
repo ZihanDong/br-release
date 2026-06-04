@@ -1,0 +1,5 @@
+# Generated k8s YAML are per-environment artifacts — keep the dirs, ignore the output.
+pod/*.yaml
+deploy/*.yaml
+!pod/.gitkeep
+!deploy/.gitkeep

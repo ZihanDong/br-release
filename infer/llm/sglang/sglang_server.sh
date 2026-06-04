@@ -5,28 +5,30 @@
 # LD_LIBRARY_PATH for the BirenTech SDK before this script is called.
 #
 # Usage:
-#   bash sglang_server.sh <config_file>
+#   bash sglang_server.sh <config_ref>
 #
-# config_file may be:
-#   - a bare model name: qwen3-vl-32b  (resolved to configs/qwen3-vl-32b.conf)
-#   - a relative path:   configs/qwen3-vl-32b.conf
-#   - an absolute path:  /path/to/any.conf
+# config_ref is resolved by utils/parse_config.sh and may be:
+#   - a bare model name:  qwen3-vl-32b   (-> configs/sglang_qwen3-vl-32b.conf)
+#   - a prefixed name:    sglang_qwen3-vl-32b
+#   - a path under configs/ or an absolute path
+# The config's framework= field must be 'sglang'.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_REGISTRY_SH="${SCRIPT_DIR}/../model_registry.sh"
+LLM_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
 _ok()   { echo -e "\033[1;32m[ OK ]\033[0m  $*"; }
+_warn() { echo -e "\033[0;33m[WARN]\033[0m  $*"; }
 _err()  { echo -e "\033[0;31m[ERR ]\033[0m  $*" >&2; }
 
 usage() {
     echo ""
-    echo "Usage: $0 <config_file>"
+    echo "Usage: $0 <config_ref>"
     echo ""
-    echo "Available configs:"
-    for f in "${SCRIPT_DIR}/configs/"*.conf; do
+    echo "Available SGLang configs:"
+    for f in "${LLM_DIR}/configs/"sglang_*.conf; do
         [[ -f "$f" ]] && echo "  $(basename "$f" .conf)"
     done
     echo ""
@@ -35,54 +37,22 @@ usage() {
 
 [[ $# -lt 1 ]] && { _err "A config file is required."; usage; }
 
-CONFIG_ARG="$1"
-CONFIG_FILE=""
-
-if [[ "$CONFIG_ARG" == /* ]]; then
-    CONFIG_FILE="$CONFIG_ARG"
-elif [[ -f "${SCRIPT_DIR}/configs/${CONFIG_ARG}.conf" ]]; then
-    CONFIG_FILE="${SCRIPT_DIR}/configs/${CONFIG_ARG}.conf"
-elif [[ -f "${SCRIPT_DIR}/${CONFIG_ARG}" ]]; then
-    CONFIG_FILE="${SCRIPT_DIR}/${CONFIG_ARG}"
-elif [[ -f "${CONFIG_ARG}" ]]; then
-    CONFIG_FILE="${CONFIG_ARG}"
-fi
-
-[[ -z "$CONFIG_FILE" || ! -f "$CONFIG_FILE" ]] && {
-    _err "Config not found: $CONFIG_ARG"; usage; }
-
-# ── Defaults (optional params only) ───────────────────────────────────────────
-# Required params have NO defaults and MUST be set in the config file:
-#   model_weights, port, tensor_parallel_size, pipeline_parallel_size,
-#   max_model_len, max_running_requests
-served_model_name=""
-mem_fraction_static=0.85
-page_size=128
-disable_radix_cache=false
-trust_remote_code=false
-extra_env=""
-extra_sglang_args=""
-
-# shellcheck source=/dev/null
-source "$CONFIG_FILE"
-
-_missing=()
-[[ -z "${model_weights:-}" ]]         && _missing+=(model_weights)
-[[ -z "${port:-}" ]]                   && _missing+=(port)
-[[ -z "${tensor_parallel_size:-}" ]]   && _missing+=(tensor_parallel_size)
-[[ -z "${pipeline_parallel_size:-}" ]] && _missing+=(pipeline_parallel_size)
-[[ -z "${max_model_len:-}" ]]          && _missing+=(max_model_len)
-[[ -z "${max_running_requests:-}" ]]   && _missing+=(max_running_requests)
-[[ ${#_missing[@]} -gt 0 ]] && {
-    _err "Required params not set in $(basename "$CONFIG_FILE"): ${_missing[*]}"; exit 1; }
+# ── Parse + validate config (framework must be sglang; defaults filled) ───────
+# multimodal_gen mode relaxes pipeline_parallel_size/max_model_len/max_running_requests.
+# shellcheck source=../utils/parse_config.sh
+source "${LLM_DIR}/utils/parse_config.sh"
+parse_config "$1" sglang || usage
 
 _info "Config      : $(basename "$CONFIG_FILE")"
-_info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
+if [[ "${launch_mode}" == "multimodal_gen" ]]; then
+    _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  [multimodal_gen]"
+else
+    _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
+fi
 
 # ── Registry lookup (via model_registry.sh) ───────────────────────────────────
-[[ ! -f "$_REGISTRY_SH" ]] && { _err "model_registry.sh not found: $_REGISTRY_SH"; exit 1; }
 # shellcheck source=../model_registry.sh
-source "$_REGISTRY_SH"
+source "${LLM_DIR}/model_registry.sh"
 parse_model "$model_weights" || exit 1
 MODEL_LOCAL_PATH="$MODEL_PATH"
 
@@ -93,14 +63,22 @@ _info "Registry    : path=$MODEL_LOCAL_PATH  download=$DOWNLOAD_NAME  status=$DI
     _err "Download weights to the host before launching the container."; exit 1; }
 _ok "Weights     : ${MODEL_LOCAL_PATH}"
 
-# ── BirenTech SGLang env vars ──────────────────────────────────────────────────
-export BRTB_PLAN_ID_RENEW=1
-export BRTB_DISABLE_ZERO_REORDER=1
-export BRTB_DISABLE_ZERO_OUTPUT_NUMA=1
-export BRTB_DISABLE_ZERO_OUTPUT_UMA=1
-export BRTB_DISABLE_ZERO_WS=1
-export BRTB_DISABLE_L2_FLUSH=1
-export BRTB_ENABLE_SUPA_FILL=1
+# ── BirenTech env vars ─────────────────────────────────────────────────────────
+if [[ "${launch_mode}" == "multimodal_gen" ]]; then
+    # Image generation backend requires different BRTB flags (set inside run_qwen-image.sh)
+    export BRTB_ENABLE_SUPA_FALLBACK=1
+    export BRTB_ENABLE_NCDHW=1
+    export BRTB_ENABLE_FORCE_EAGER_CONV2D=1
+    export SUDNN_EAGER_ENABLE_ALPHA_BETA=false
+else
+    export BRTB_PLAN_ID_RENEW=1
+    export BRTB_DISABLE_ZERO_REORDER=1
+    export BRTB_DISABLE_ZERO_OUTPUT_NUMA=1
+    export BRTB_DISABLE_ZERO_OUTPUT_UMA=1
+    export BRTB_DISABLE_ZERO_WS=1
+    export BRTB_DISABLE_L2_FLUSH=1
+    export BRTB_ENABLE_SUPA_FILL=1
+fi
 
 # Extra model-specific env vars (space-separated KEY=VALUE pairs from conf)
 if [[ -n "${extra_env:-}" ]]; then
@@ -109,22 +87,41 @@ if [[ -n "${extra_env:-}" ]]; then
     done
 fi
 
-# ── Build sglang args array ────────────────────────────────────────────────────
-sglang_args=(
-    python3 -m sglang.launch_server
-    --host 0.0.0.0
-    --port "${port}"
-    --model-path "${MODEL_LOCAL_PATH}"
-    --tp-size "${tensor_parallel_size}"
-    --pp-size "${pipeline_parallel_size}"
-    --mem-fraction-static "${mem_fraction_static}"
-    --max-model-len "${max_model_len}"
-    --max-running-requests "${max_running_requests}"
-    --page-size "${page_size}"
-)
-[[ "$trust_remote_code" == "true" ]] && sglang_args+=(--trust-remote-code)
-[[ "$disable_radix_cache" == "true" ]] && sglang_args+=(--disable-radix-cache)
-[[ -n "$served_model_name" ]]          && sglang_args+=(--served-model-name "${served_model_name}")
+# ── Build launch args array ────────────────────────────────────────────────────
+if [[ "${launch_mode}" == "multimodal_gen" ]]; then
+    mkdir -p "${output_path}"
+    sglang_args=(
+        python3 "${SCRIPT_DIR}/run_qwen-image.sh"
+        --model-path "${MODEL_LOCAL_PATH}"
+        --num-gpus "${tensor_parallel_size}"
+        --tp-size "${tensor_parallel_size}"
+        --host 0.0.0.0
+        --port "${port}"
+        --output-path "${output_path}"
+        --dit-cpu-offload "${dit_cpu_offload}"
+        --dit-layerwise-offload "${dit_layerwise_offload}"
+        --image-encoder-cpu-offload "${image_encoder_cpu_offload}"
+        --text-encoder-cpu-offload "${text_encoder_cpu_offload}"
+        --vae-cpu-offload "${vae_cpu_offload}"
+    )
+    [[ -n "$served_model_name" ]] && sglang_args+=(--served-model-name "${served_model_name}")
+else
+    sglang_args=(
+        python3 -m sglang.launch_server
+        --host 0.0.0.0
+        --port "${port}"
+        --model-path "${MODEL_LOCAL_PATH}"
+        --tp-size "${tensor_parallel_size}"
+        --pp-size "${pipeline_parallel_size}"
+        --mem-fraction-static "${mem_fraction_static}"
+        --max-model-len "${max_model_len}"
+        --max-running-requests "${max_running_requests}"
+        --page-size "${page_size}"
+    )
+    [[ "$trust_remote_code" == "true" ]] && sglang_args+=(--trust-remote-code)
+    [[ "$disable_radix_cache" == "true" ]] && sglang_args+=(--disable-radix-cache)
+    [[ -n "$served_model_name" ]]          && sglang_args+=(--served-model-name "${served_model_name}")
+fi
 
 # Extra model-specific sglang flags (e.g. --enable-mixed-chunk)
 if [[ -n "${extra_sglang_args:-}" ]]; then

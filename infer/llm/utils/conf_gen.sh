@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# vllm_conf_gen.sh — Interactive / non-interactive vLLM conf editor
+# conf_gen.sh — Interactive / non-interactive model-config editor.
+# Works on any infer/llm/configs/*.conf (vLLM or SGLang); it only edits
+# key=value lines, preserving comments and structure.
+#
 # Usage:
-#   Interactive:     vllm_conf_gen.sh <conf_file>
-#   Non-interactive: vllm_conf_gen.sh <conf_file> --key1 val1 --key2 val2 ...
+#   Interactive:     conf_gen.sh <conf_file>
+#   Non-interactive: conf_gen.sh <conf_file> --key1 val1 --key2 val2 ...
 #
 # Interactive: prompts for each key=value (Enter = keep).
 # Non-interactive: applies --key val overrides directly, no prompts.
-# Writes changed values into a new file whose name encodes the changes.
+# Writes changed values into a new file whose name encodes the changes
+# (e.g. vllm_minimax-m2.5_max_model_len-18000.conf).
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <conf_file> [--key val ...]" >&2

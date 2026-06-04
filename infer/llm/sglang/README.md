@@ -1,11 +1,16 @@
 # SGLang Server — BirenTech GPU 部署指南
 
+> 统一布局总览见 [`../README.md`](../README.md)。模型配置集中在 `../configs/sglang_*.conf`
+> （首行 `framework=sglang`），由 `../utils/parse_config.sh` 统一解析校验；k8s YAML 生成/应用用
+> 跨框架的 `../utils/k8s_yaml_gen.sh` 和 `../utils/k8s_apply.sh`，产物落到 `../configs/{pod,deploy}/`。
+> 本文档只讲 SGLang 专属内容。
+
 本目录提供两种方式在 BirenTech GPU 节点上拉起 SGLang OpenAI 兼容推理服务：
 
 | 方式 | 脚本 | 适用场景 |
 |------|------|---------|
 | **Docker** | `run_docker.sh` | 快速调试、单次运行 |
-| **Kubernetes** | `k8s_yaml_gen.sh` + `k8s_apply.sh` | 生产部署、持久运行 |
+| **Kubernetes** | `../utils/k8s_yaml_gen.sh` + `../utils/k8s_apply.sh` | 生产部署、持久运行 |
 
 ---
 
@@ -48,15 +53,15 @@
 ```
 infer/llm/
 ├── model_registry.conf   # 模型库：本地路径 + HuggingFace/ModelScope ID（多框架共享）
+├── configs/              # 统一模型配置（多框架共享）+ 生成的 k8s YAML
+│   ├── sglang_qwen3-vl-32b.conf  # Qwen3-VL-32B（VL chat，端口 28800，k8s NodePort 30900）
+│   ├── sglang_qwen-image.conf    # Qwen-Image-2512（多模态图像生成，端口 38000，NodePort 30901）
+│   ├── pod/  deploy/             # k8s_yaml_gen.sh 产物
+├── utils/                # 跨框架工具：parse_config.sh / k8s_yaml_gen.sh / k8s_apply.sh / conf_gen.sh
 └── sglang/
-    ├── sglang_server.sh      # 容器内脚本：加载 conf → 查 registry → exec sglang
-    ├── run_docker.sh         # Docker 外层：GPU 选择 + 容器启动；默认交互式，--run 直接拉起 server
-    ├── k8s_yaml_gen.sh       # k8s YAML 生成器：--task pod|deploy，输出 YAML 到 k8s_yaml_gen/
-    ├── k8s_apply.sh          # k8s 部署：apply YAML；deploy 自动测试，pod 进入交互式 shell
-    ├── configs/
-    │   └── qwen3-vl-32b.conf   # Qwen3-VL-32B（VL chat，端口 28800，k8s NodePort 30900）
-    ├── k8s_yaml_gen/         # 生成的 k8s YAML（临时文件，可按需修改后应用）
-    │   └── qwen3-vl-32b-deploy.yaml
+    ├── sglang_server.sh      # 容器内脚本：parse_config → 查 registry → exec sglang
+    ├── run_docker.sh         # Docker 外层：GPU 选择 + 端口检查 + 容器启动；默认交互式，--run 直接拉起 server
+    ├── run_qwen-image.sh     # 多模态图像生成入口（launch_mode=multimodal_gen）
     └── logs/                 # 启动日志（自动生成）
 ```
 
@@ -180,27 +185,30 @@ kubectl get runtimeclass biren
 
 ### 2.3 典型工作流
 
+> 统一生成器需要一个 GPU 资源模式（`--gpu` / `--svi` / `--vgpu-core+--vgpu-mem`，见 `../README.md`）。
+> 配置用 `sglang_<model>`（裸名也行，生成器经 parser 自动定位 `../configs/sglang_<model>.conf`）。
+
 **Deployment 方式（生产推荐）：**
 
 ```bash
-cd infer/llm/sglang
+cd infer/llm
 
-# Step 1：生成 YAML
-bash k8s_yaml_gen.sh --task deploy --node brhost-01 qwen3-vl-32b
-# → 保存到 k8s_yaml_gen/qwen3-vl-32b-deploy-node-brhost-01-p28800-r1.yaml
+# Step 1：生成 YAML（整卡模式；可选 --node 固定节点）
+bash utils/k8s_yaml_gen.sh --task deploy --gpu --node brhost-01 sglang_qwen3-vl-32b
+# → 保存到 configs/deploy/sglang_qwen3-vl-32b-deploy-node-brhost-01-p28800-r1.yaml
 
 # Step 2：（可选）查看 YAML
-cat k8s_yaml_gen/qwen3-vl-32b-deploy-node-brhost-01-p28800-r1.yaml
+cat configs/deploy/sglang_qwen3-vl-32b-deploy-node-brhost-01-p28800-r1.yaml
 
 # Step 3：部署并自动测试 API
-bash k8s_apply.sh k8s_yaml_gen/qwen3-vl-32b-deploy-node-brhost-01-p28800-r1.yaml
+bash utils/k8s_apply.sh configs/deploy/sglang_qwen3-vl-32b-deploy-node-brhost-01-p28800-r1.yaml
 ```
 
 **Pod 方式（调试 / 手动控制）：**
 
 ```bash
-bash k8s_yaml_gen.sh --task pod --node brhost-01 qwen3-vl-32b
-bash k8s_apply.sh k8s_yaml_gen/qwen3-vl-32b-pod-node-brhost-01-p28800.yaml
+bash utils/k8s_yaml_gen.sh --task pod --gpu --node brhost-01 sglang_qwen3-vl-32b
+bash utils/k8s_apply.sh configs/pod/sglang_qwen3-vl-32b-pod-node-brhost-01-p28800.yaml
 # → Pod Running 后进入交互式 shell，手动运行：
 # bash run_sglang_qwen3-vl-32b_server.sh
 ```
@@ -224,7 +232,7 @@ bash k8s_yaml_gen.sh --task <pod|deploy> [选项] <config>
 
 输出文件命名规则：
 ```
-k8s_yaml_gen/<model>-<type>[-node-<n>|-label-<v>]-p<port>[-r<replicas>].yaml
+configs/{pod,deploy}/sglang_<model>-<type>[-svi-…|-vgpu-…][-node-<n>|-label-<v>]-p<port>[-r<replicas>].yaml
 ```
 
 ### 2.5 端口说明
@@ -300,19 +308,20 @@ download_name=Qwen/Qwen3-VL-32B-Instruct
 ```bash
 # 1. 在 infer/llm/model_registry.conf 添加条目
 # 2. 复制并修改 conf 文件
-cp configs/qwen3-vl-32b.conf configs/my-model.conf
-# 修改 model_weights、port、tp/pp、k8s_nodeport 等
+cp ../configs/sglang_qwen3-vl-32b.conf ../configs/sglang_my-model.conf
+# 修改 framework(=sglang 保持)、model_weights、port、tp/pp、k8s_nodeport 等
 
 # 3. Docker 启动
 sudo bash run_docker.sh --run my-model
 
-# 4. k8s Deployment 部署
-bash k8s_yaml_gen.sh --task deploy my-model
-bash k8s_apply.sh k8s_yaml_gen/my-model-deploy-p<port>-r1.yaml
+# 4. k8s Deployment 部署（从 infer/llm 目录）
+cd ..
+bash utils/k8s_yaml_gen.sh --task deploy --gpu sglang_my-model
+bash utils/k8s_apply.sh configs/deploy/sglang_my-model-deploy-p<port>-r1.yaml
 
 # 5. k8s Pod 交互式调试
-bash k8s_yaml_gen.sh --task pod my-model
-bash k8s_apply.sh k8s_yaml_gen/my-model-pod-p<port>.yaml
+bash utils/k8s_yaml_gen.sh --task pod --gpu sglang_my-model
+bash utils/k8s_apply.sh configs/pod/sglang_my-model-pod-p<port>.yaml
 ```
 
 ---

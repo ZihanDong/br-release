@@ -352,8 +352,8 @@ sudo NODE=<gpu-node> bash tests/run-hami-bundle-tests.sh all
   2. 在 Master 上 `set-node-mode.sh biren --vgpu <节点1,节点2,...>` 一次性部署统一插件。
 
 > **install.sh / master.sh 无需改动**：二者不含 GPU 插件逻辑（基础环境 + 控制面初始化）；GPU 插件
-> 的部署完全由 `set-node-mode.sh`（及 `join.sh` 的原厂整卡路径）负责。vLLM / SGLang 的 k8s YAML
-> 生成器（`infer/llm/{vllm,sglang}/k8s_yaml_gen.sh`）生成的工作负载已统一设置
+> 的部署完全由 `set-node-mode.sh`（及 `join.sh` 的原厂整卡路径）负责。vLLM / SGLang 的统一 k8s YAML
+> 生成器（`infer/llm/utils/k8s_yaml_gen.sh`）生成的工作负载已统一设置
 > `schedulerName: hami-scheduler`，与统一插件配套。
 
 ---

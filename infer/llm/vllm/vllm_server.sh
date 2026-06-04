@@ -5,28 +5,30 @@
 # LD_LIBRARY_PATH for the BirenTech SDK before this script is called.
 #
 # Usage:
-#   bash vllm_server.sh <config_file>
+#   bash vllm_server.sh <config_ref>
 #
-# config_file may be:
-#   - a bare model name: bge-m3  (resolved to configs/bge-m3.conf)
-#   - a relative path:   configs/bge-m3.conf
-#   - an absolute path:  /path/to/any.conf
+# config_ref is resolved by utils/parse_config.sh and may be:
+#   - a bare model name:  qwen3-vl-32b   (-> configs/vllm_qwen3-vl-32b.conf)
+#   - a prefixed name:    vllm_qwen3-vl-32b
+#   - a path under configs/ or an absolute path
+# The config's framework= field must be 'vllm'.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_REGISTRY_SH="${SCRIPT_DIR}/../model_registry.sh"
+LLM_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
 _ok()   { echo -e "\033[1;32m[ OK ]\033[0m  $*"; }
+_warn() { echo -e "\033[0;33m[WARN]\033[0m  $*"; }
 _err()  { echo -e "\033[0;31m[ERR ]\033[0m  $*" >&2; }
 
 usage() {
     echo ""
-    echo "Usage: $0 <config_file>"
+    echo "Usage: $0 <config_ref>"
     echo ""
-    echo "Available configs:"
-    for f in "${SCRIPT_DIR}/configs/"*.conf; do
+    echo "Available vLLM configs:"
+    for f in "${LLM_DIR}/configs/"vllm_*.conf; do
         [[ -f "$f" ]] && echo "  $(basename "$f" .conf)"
     done
     echo ""
@@ -35,57 +37,18 @@ usage() {
 
 [[ $# -lt 1 ]] && { _err "A config file is required."; usage; }
 
-CONFIG_ARG="$1"
-CONFIG_FILE=""
-
-if [[ "$CONFIG_ARG" == /* ]]; then
-    CONFIG_FILE="$CONFIG_ARG"
-elif [[ -f "${SCRIPT_DIR}/configs/${CONFIG_ARG}.conf" ]]; then
-    CONFIG_FILE="${SCRIPT_DIR}/configs/${CONFIG_ARG}.conf"
-elif [[ -f "${SCRIPT_DIR}/${CONFIG_ARG}" ]]; then
-    CONFIG_FILE="${SCRIPT_DIR}/${CONFIG_ARG}"
-elif [[ -f "${CONFIG_ARG}" ]]; then
-    CONFIG_FILE="${CONFIG_ARG}"
-fi
-
-[[ -z "$CONFIG_FILE" || ! -f "$CONFIG_FILE" ]] && {
-    _err "Config not found: $CONFIG_ARG"; usage; }
-
-# ── Defaults (optional params only) ───────────────────────────────────────────
-# Required params have NO defaults and MUST be set in the config file:
-#   model_weights, port, tensor_parallel_size, pipeline_parallel_size,
-#   max_model_len, max_num_seqs
-served_model_name=""
-task=""
-dtype="auto"
-gpu_memory_utilization=0.8
-enable_chunked_prefill=false
-enforce_eager=false
-distributed_executor_backend=""
-compilation_config=""
-extra_env=""
-extra_vllm_args=""
-
-# shellcheck source=/dev/null
-source "$CONFIG_FILE"
-
-_missing=()
-[[ -z "${model_weights:-}" ]]         && _missing+=(model_weights)
-[[ -z "${port:-}" ]]                   && _missing+=(port)
-[[ -z "${tensor_parallel_size:-}" ]]   && _missing+=(tensor_parallel_size)
-[[ -z "${pipeline_parallel_size:-}" ]] && _missing+=(pipeline_parallel_size)
-[[ -z "${max_model_len:-}" ]]          && _missing+=(max_model_len)
-[[ -z "${max_num_seqs:-}" ]]           && _missing+=(max_num_seqs)
-[[ ${#_missing[@]} -gt 0 ]] && {
-    _err "Required params not set in $(basename "$CONFIG_FILE"): ${_missing[*]}"; exit 1; }
+# ── Parse + validate config (framework must be vllm; defaults filled) ─────────
+# After this, every param has a value — no per-script defaults needed.
+# shellcheck source=../utils/parse_config.sh
+source "${LLM_DIR}/utils/parse_config.sh"
+parse_config "$1" vllm || usage
 
 _info "Config      : $(basename "$CONFIG_FILE")"
 _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
 
 # ── Registry lookup (via model_registry.sh) ───────────────────────────────────
-[[ ! -f "$_REGISTRY_SH" ]] && { _err "model_registry.sh not found: $_REGISTRY_SH"; exit 1; }
 # shellcheck source=../model_registry.sh
-source "$_REGISTRY_SH"
+source "${LLM_DIR}/model_registry.sh"
 parse_model "$model_weights" || exit 1
 MODEL_LOCAL_PATH="$MODEL_PATH"
 

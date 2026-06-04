@@ -24,10 +24,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LLM_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 LOG_DIR="${SCRIPT_DIR}/logs"
-CONTAINER_IMAGE='birensupa-smartinfer-vllm:26.05.28-py310-pt2.8.0-c059s001t003b24145-br1xx'
+CONTAINER_IMAGE='birensupa-smartinfer-vllm:26.04.rc2-py310-pt2.8.0-br1xx'
+
+# parse_config.sh provides parse_config (normal mode) + port_in_use/ensure_dir helpers.
+# shellcheck source=../utils/parse_config.sh
+source "${LLM_DIR}/utils/parse_config.sh"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
@@ -58,8 +63,13 @@ usage() {
     echo "  *.d.conf       — PD Decode node (requires proxy_conf)"
     echo "  *.proxy.conf   — Proxy server only (no GPU)"
     echo ""
-    echo "Available configs:"
-    for f in "${SCRIPT_DIR}/configs/"*.conf; do
+    echo "Available configs (normal mode, from ../configs/):"
+    for f in "${LLM_DIR}/configs/"vllm_*.conf; do
+        [[ -f "$f" ]] && echo "  $(basename "$f" .conf)"
+    done
+    echo ""
+    echo "Available PD configs (vllm/configs/):"
+    for f in "${SCRIPT_DIR}/configs/"*.p.conf "${SCRIPT_DIR}/configs/"*.d.conf; do
         [[ -f "$f" ]] && echo "  $(basename "$f")"
     done
     echo ""
@@ -217,47 +227,38 @@ fi
 # NORMAL / PD MODE — common config loading and GPU selection
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── Resolve main config ────────────────────────────────────────────────────────
-CONFIG_FILE="$(resolve_config "$CONFIG_ARG" "${SCRIPT_DIR}/configs")"
-[[ -z "$CONFIG_FILE" || ! -f "$CONFIG_FILE" ]] && {
-    _err "Config not found: $CONFIG_ARG"; usage; }
-
-# ── Load config with defaults ─────────────────────────────────────────────────
-served_model_name=""
-task=""
-dtype="auto"
-gpu_memory_utilization=0.8
-enable_chunked_prefill=false
-enforce_eager=false
-distributed_executor_backend=""
-compilation_config=""
-docker_image=""
-extra_env=""
-extra_vllm_args=""
-# PD-mode extras
-dp_size=1
-http_ip="0.0.0.0"
-max_num_batched_tokens=""
-succl_socket_ifname=""
-
-# shellcheck source=/dev/null
-source "$CONFIG_FILE"
+# ── Load + validate config ─────────────────────────────────────────────────────
+if [[ "$MODE" == "pd" ]]; then
+    # PD configs (*.p.conf / *.d.conf) live in vllm/configs/ and are parsed inline;
+    # the unified parser (utils/parse_config.sh) covers standard single-node configs only.
+    CONFIG_FILE="$(resolve_config "$CONFIG_ARG" "${SCRIPT_DIR}/configs")"
+    [[ -z "$CONFIG_FILE" || ! -f "$CONFIG_FILE" ]] && { _err "Config not found: $CONFIG_ARG"; usage; }
+    served_model_name=""; task=""; dtype="auto"; gpu_memory_utilization=0.75
+    enable_chunked_prefill=false; enforce_eager=false; distributed_executor_backend=""
+    compilation_config=""; docker_image=""; extra_env=""; extra_vllm_args=""
+    dp_size=1; http_ip="0.0.0.0"; max_num_batched_tokens=""; succl_socket_ifname=""
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+    _missing=()
+    for _v in model_weights port tensor_parallel_size pipeline_parallel_size \
+              max_model_len max_num_seqs max_num_batched_tokens; do
+        [[ -z "${!_v:-}" ]] && _missing+=("$_v")
+    done
+    [[ ${#_missing[@]} -gt 0 ]] && {
+        _err "Required params not set in $(basename "$CONFIG_FILE"): ${_missing[*]}"; exit 1; }
+else
+    # Normal mode: unified configs/ via parse_config.sh (framework must be vllm;
+    # optional params get defaults filled in — no inline default block needed).
+    parse_config "$CONFIG_ARG" vllm || usage
+fi
 
 [[ -n "${docker_image:-}" ]] && CONTAINER_IMAGE="$docker_image"
 
-# ── Validate required params ──────────────────────────────────────────────────
-_missing=()
-[[ -z "${model_weights:-}" ]]         && _missing+=(model_weights)
-[[ -z "${port:-}" ]]                   && _missing+=(port)
-[[ -z "${tensor_parallel_size:-}" ]]   && _missing+=(tensor_parallel_size)
-[[ -z "${pipeline_parallel_size:-}" ]] && _missing+=(pipeline_parallel_size)
-[[ -z "${max_model_len:-}" ]]          && _missing+=(max_model_len)
-[[ -z "${max_num_seqs:-}" ]]           && _missing+=(max_num_seqs)
-if [[ "$MODE" == "pd" ]]; then
-    [[ -z "${max_num_batched_tokens:-}" ]] && _missing+=(max_num_batched_tokens)
+# ── Host port availability (server runs with --net host) ───────────────────────
+if port_in_use "$port"; then
+    _err "Port ${port} is already in use on this host (--net host)."
+    _err "Stop the conflicting process or change 'port' in $(basename "$CONFIG_FILE")."; exit 1
 fi
-[[ ${#_missing[@]} -gt 0 ]] && {
-    _err "Required params not set in $(basename "$CONFIG_FILE"): ${_missing[*]}"; exit 1; }
 
 # ── PD mode: resolve proxy conf ───────────────────────────────────────────────
 PROXY_FILE=""
@@ -343,24 +344,24 @@ _ok "Container started."
 _nan_diff="${SCRIPT_DIR}/hetero_succl_connector_nan_patch.diff"
 _connector_py="/usr/local/lib/python3.10/dist-packages/vllm_br/distributed/kv_transfer/kv_connector/v1/p2p/hetero_succl_connector.py"
 _connector_pyc="/usr/local/lib/python3.10/dist-packages/vllm_br/distributed/kv_transfer/kv_connector/v1/p2p/__pycache__/hetero_succl_connector.cpython-310.pyc"
-if [[ -f "$_nan_diff" ]]; then
-    _patch_result=$($DOCKER_CMD exec "$CONTAINER_NAME" \
-        patch -N "$_connector_py" "$_nan_diff" 2>&1)
-    _patch_rc=$?
-    if [[ $_patch_rc -eq 0 ]]; then
-        $DOCKER_CMD exec "$CONTAINER_NAME" rm -f "$_connector_pyc" 2>/dev/null || true
-        _ok "Connector patch: nan_to_num(0) applied to $(basename "$_connector_py")"
-    elif echo "$_patch_result" | grep -q "Reversed\|already applied"; then
-        $DOCKER_CMD exec "$CONTAINER_NAME" rm -f "${_connector_py}.rej" 2>/dev/null || true
-        _info "Connector patch: already applied, skipped"
-    else
-        $DOCKER_CMD exec "$CONTAINER_NAME" rm -f "${_connector_py}.rej" 2>/dev/null || true
-        _warn "Connector patch: patch returned rc=${_patch_rc}: ${_patch_result}"
-    fi
-else
+# The connector only exists in PD (kv_transfer) images; normal single-node models
+# (qwen3-vl, bge-m3, …) don't ship it, so skip the patch cleanly when it's absent.
+# Using `if var=$(...)` keeps a non-zero patch from tripping `set -e`.
+if [[ ! -f "$_nan_diff" ]]; then
     _warn "Connector patch: diff not found at ${_nan_diff}, skipping"
+elif ! $DOCKER_CMD exec "$CONTAINER_NAME" test -f "$_connector_py" 2>/dev/null; then
+    _info "Connector patch: connector not present in image (non-PD model), skipping"
+elif _patch_result=$($DOCKER_CMD exec "$CONTAINER_NAME" patch -N "$_connector_py" "$_nan_diff" 2>&1); then
+    $DOCKER_CMD exec "$CONTAINER_NAME" rm -f "$_connector_pyc" 2>/dev/null || true
+    _ok "Connector patch: nan_to_num(0) applied to $(basename "$_connector_py")"
+elif echo "${_patch_result:-}" | grep -q "Reversed\|already applied"; then
+    $DOCKER_CMD exec "$CONTAINER_NAME" rm -f "${_connector_py}.rej" 2>/dev/null || true
+    _info "Connector patch: already applied, skipped"
+else
+    $DOCKER_CMD exec "$CONTAINER_NAME" rm -f "${_connector_py}.rej" 2>/dev/null || true
+    _warn "Connector patch: patch failed: ${_patch_result:-}"
 fi
-unset _nan_diff _connector_py _connector_pyc _patch_result _patch_rc
+unset _nan_diff _connector_py _connector_pyc _patch_result
 echo ""
 
 # ── Write server run script ───────────────────────────────────────────────────
