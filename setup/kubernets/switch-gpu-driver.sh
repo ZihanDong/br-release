@@ -42,9 +42,11 @@ VGPU_TOOL="/usr/local/bin/br_vgpu_tool"
 
 # ── 日志 ──────────────────────────────────────────────────────────────────────
 _c() { printf '\033[%sm' "$1"; }; _r() { printf '\033[0m'; }
-log_info() { echo -e "$(_c '0;36')[INFO]$(_r)  $*"; }
-log_ok()   { echo -e "$(_c '1;32')[ OK ]$(_r)  $*"; }
-log_warn() { echo -e "$(_c '0;33')[WARN]$(_r)  $*"; }
+# All diagnostics go to stderr so functions can safely return values via stdout
+# (e.g. ensure_store echoes a path that $(...) must capture cleanly).
+log_info() { echo -e "$(_c '0;36')[INFO]$(_r)  $*" >&2; }
+log_ok()   { echo -e "$(_c '1;32')[ OK ]$(_r)  $*" >&2; }
+log_warn() { echo -e "$(_c '0;33')[WARN]$(_r)  $*" >&2; }
 log_err()  { echo -e "$(_c '0;31')[ERR ]$(_r)  $*" >&2; }
 die()      { log_err "$*"; exit 1; }
 
@@ -291,12 +293,16 @@ switch_to() {  # <mode> <persist> <force> <yes> <override_src>
         [[ "$ans" == "yes" ]] || die "已取消。"
     fi
 
+    # Seed the *current* mode into the store before unloading, so we can roll
+    # back to the exact running driver if loading the target fails.
+    local ko_rollback=""
+    [[ "$cur" != "none" ]] && ko_rollback="$(ensure_store "$cur" || true)"
+
     unload_module "$force"
 
     if ! load_ko "$ko_target" "$target_ver"; then
         log_err "加载 ${mode} 驱动失败！尝试回滚到 ${cur} ..."
-        local ko_back; [[ "$other" == vgpu ]] && ko_back="${VGPU_KO}" || ko_back="${DEFAULT_KO}"
-        if [[ -f "$ko_back" ]] && load_ko "$ko_back" ""; then
+        if [[ -n "$ko_rollback" && -f "$ko_rollback" ]] && load_ko "$ko_rollback" ""; then
             log_warn "已回滚到 ${cur} 驱动（version=$(loaded_version)）。请检查 ${mode} 构建。"
         else
             die "回滚也失败：本节点当前无 GPU 驱动！请手动 insmod 一个匹配 ${KREL} 的 biren.ko。"
