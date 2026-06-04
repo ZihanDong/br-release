@@ -363,6 +363,10 @@ spec:
       # birentech.com/gpu device plugin selects which cards are allocated per pod.
       # No privileged mode or hardcoded BIREN_VISIBLE_DEVICES needed.
       runtimeClassName: biren
+      # Unified HAMi-Biren plugin: GPU pods are placed by hami-scheduler, which does
+      # topology-aware multi-card allocation (<=4 cards land in one 4-card high-speed
+      # interconnect group). No admission webhook, so schedulerName is set explicitly.
+      schedulerName: hami-scheduler
 ${_sched_deploy}
       containers:
       - name: sglang-server
@@ -517,6 +521,9 @@ spec:
   # birentech.com/gpu device plugin selects which cards are allocated per pod.
   # No privileged mode or hardcoded BIREN_VISIBLE_DEVICES needed.
   runtimeClassName: biren
+  # Unified HAMi-Biren plugin: placed by hami-scheduler (topology-aware multi-card;
+  # <=4 cards land in one 4-card high-speed interconnect group). No webhook -> explicit.
+  schedulerName: hami-scheduler
 ${_sched_pod}
   restartPolicy: Never
   containers:
