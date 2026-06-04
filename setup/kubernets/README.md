@@ -85,7 +85,13 @@ cp -a /home/<user>/hami_br_deploy/. packages/hami-biren/
 - **壁仞驱动**：每个 GPU 节点已装 BIRENSUPA 驱动 + BRML（默认
   `/usr/local/birensupa/driver/biren-smi/`，`brsmi` 可用）。整卡 / SVI 用现有驱动即可。
 - **vGPU 软切分**：节点需加载与内核匹配的 **1.12.0 KMD**（`packages/hami-biren/kmd/biren.ko`，
-  管理员手动 `insmod`；`insmod` 重启失效，需重新加载或打包 DKMS）。`set-node-mode.sh --vgpu`
+  管理员手动 `insmod`；`insmod` 重启失效）。**持久化（跨重启）**：biren 经 PCI modalias 从
+  `/lib/modules/$(uname -r)/updates/biren.ko.xz` 开机自加载，故把该文件换成 1.12.0 构建即可：
+  `xz -c <1.12.0>.ko > /lib/modules/$(uname -r)/updates/biren.ko.xz && depmod -a`（先备份原文件）。
+  本机 `dkms.service` 开机会跑 `dkms autoinstall`，须把原 DKMS 1.11.0 的 `AUTOINSTALL` 改为
+  `no`（`/usr/src/biren-1.11.0/dkms.conf`），否则每次开机会重建 1.11.0 覆盖回去。**勿** `dkms
+  remove` 1.11.0 —— 其 `post-remove` 会卸载驱动并删除 `/lib/firmware/biren`。换内核后需用
+  `kmd/.../build-kylin.sh build` 对新内核重新编译并重做上述替换。`set-node-mode.sh --vgpu`
   会在缺 `helm` 时经 `https_proxy` 自动下载，并自动把 HAMi 内置 kube-scheduler 镜像对齐到
   集群 k8s 版本（复用已缓存的 `registry.aliyuncs.com/google_containers/kube-scheduler:v<版本>`）。
   - **`br_vgpu_tool` 与宿主机 glibc**：安装包预编译的 `br_vgpu_tool` 需 glibc ≥ 2.34；
