@@ -105,7 +105,24 @@ vllm_args=(
     --model "${MODEL_LOCAL_PATH}"
 )
 [[ -n "$served_model_name" ]] && vllm_args+=(--served_model_name "${served_model_name}")
-[[ -n "$task" ]]              && vllm_args+=(--task "${task}")
+# Task selection: vLLM >= 0.10 replaced `--task` with `--runner {generate,pooling}`
+# (+ `--convert`); `--task` is rejected on vLLM 0.16. Detect the installed vLLM and
+# map the config's `task` accordingly so the same conf works on old and new images.
+if [[ -n "$task" ]]; then
+    _vllm_new=$(python3 -c "import vllm
+from packaging.version import parse
+print('1' if parse(vllm.__version__) >= parse('0.10.0') else '0')" 2>/dev/null || echo "")
+    if [[ "$_vllm_new" == "1" ]]; then
+        case "$task" in
+            generate)                                  vllm_args+=(--runner generate) ;;
+            embed|embedding|classify|score|reward|pooling) vllm_args+=(--runner pooling) ;;
+            *) _warn "unrecognized task='${task}' for vLLM>=0.10; defaulting to --runner pooling"; vllm_args+=(--runner pooling) ;;
+        esac
+        _info "Task        : ${task} -> --runner $([[ "$task" == generate ]] && echo generate || echo pooling) (vLLM $(python3 -c 'import vllm;print(vllm.__version__)' 2>/dev/null))"
+    else
+        vllm_args+=(--task "${task}")   # older vLLM still accepts --task
+    fi
+fi
 vllm_args+=(
     --trust_remote_code
     --dtype "${dtype}"
