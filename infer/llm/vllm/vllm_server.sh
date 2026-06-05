@@ -121,6 +121,30 @@ if [[ -n "${extra_env:-}" ]]; then
     done
 fi
 
+# ── vGPU readiness gate ───────────────────────────────────────────────────────
+# On vGPU (BR_VGPU_UUID set), a host-side binder must register THIS container's
+# memory-cgroup inode to its SPC/HBM profile (`br_vgpu_tool apply_reg`) AFTER the
+# container starts — see setup/kubernets/biren-vgpu-binder.sh. (The biren-mode-
+# manager only puts the card into vGPU mode; it does not do the per-container
+# bind on this cgroup-v1 / kernel-4.19 cluster.) If vLLM initialises SUPA before
+# the bind lands it dies with "SUPA ErrorCode: 100, no device". Wait until a SUPA
+# tensor can actually be allocated on the slice.
+if [[ -n "${BR_VGPU_UUID:-}" ]]; then
+    _info "vGPU 模式：等待切片绑定到本容器 cgroup（最多 180s）..."
+    # "no device" is an uncatchable C++ terminate(), so each probe runs in its own
+    # subshell with core dumps disabled (ulimit -c 0) — an abort kills only that
+    # probe (exit!=0, no core-dump churn), bash retries. torch_br maps SUPA to the
+    # 'supa' device (NOT 'cuda'), so the probe must allocate on device='supa'.
+    _vgpu_ready=0; _deadline=$(( $(date +%s) + 180 ))
+    while [[ $(date +%s) -lt $_deadline ]]; do
+        if ( ulimit -c 0; python3 -c "import torch, torch_br; torch.ones(1, device='supa')" ) >/dev/null 2>&1; then
+            _vgpu_ready=1; break
+        fi
+        sleep 2
+    done
+    [[ "$_vgpu_ready" == 1 ]] && _ok "vGPU 切片就绪，启动 vLLM。" || _warn "vGPU 就绪探测超时，仍尝试启动。"
+fi
+
 _ok "Launching   : ${vllm_args[*]}"
 echo ""
 
