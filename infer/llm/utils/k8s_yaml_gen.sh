@@ -54,8 +54,10 @@ source "${SCRIPT_DIR}/parse_config.sh"
 source "${SCRIPT_DIR}/parse_image_list.sh"
 
 # ── Framework defaults (used when a config omits k8s_image) ────────────────────
-_VLLM_K8S_IMAGE='172.25.198.36:32000/infer/birensupa-smartinfer-vllm:26.04.rc2-py310-pt2.8.0-br1xx'
-_SGLANG_K8S_IMAGE='172.25.198.36:32000/infer/birensupa-smartinfer-sglang:26.04.rc2-py310-pt2.9.0-br1xx'
+# Per-cluster override: export VLLM_K8S_IMAGE / SGLANG_K8S_IMAGE, or set k8s_image=
+# in the config. (The default registry below is the build cluster's; override it.)
+_VLLM_K8S_IMAGE="${VLLM_K8S_IMAGE:-172.25.198.36:32000/infer/birensupa-smartinfer-vllm:26.04.rc2-py310-pt2.8.0-br1xx}"
+_SGLANG_K8S_IMAGE="${SGLANG_K8S_IMAGE:-172.25.198.36:32000/infer/birensupa-smartinfer-sglang:26.04.rc2-py310-pt2.9.0-br1xx}"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 _info() { echo -e "\033[0;36m[INFO]\033[0m  $*"; }
@@ -245,6 +247,17 @@ VGPU_SUFFIX=""
 _hami_sched_deploy="      schedulerName: hami-scheduler"
 _hami_sched_pod="  schedulerName: hami-scheduler"
 
+# RuntimeClass 'biren' (BirenTech Container Toolkit) injects devices for the
+# whole-card flow. For vGPU/SVI the HAMi device-plugin injects /dev/biren-m + the
+# assigned card itself, and the biren RuntimeClass conflicts -> omit it there.
+if [[ "$GPU_MODE" == "gpu" ]]; then
+    _runtime_class_deploy=$'      runtimeClassName: biren\n'
+    _runtime_class_pod=$'  runtimeClassName: biren\n'
+else
+    _runtime_class_deploy=""
+    _runtime_class_pod=""
+fi
+
 case "$GPU_MODE" in
     gpu) : ;;  # whole card(s): birentech.com/gpu = tp*pp (set above)
     svi)
@@ -308,8 +321,16 @@ ENV_POD="$(_env_lines '    ')"          # 4-space indent (Pod container)
 # ── Resolve node scheduling ───────────────────────────────────────────────────
 _DEFAULT_LABEL=false
 if [[ -n "$OPT_NODE" ]]; then
-    SCHED_TYPE="node"
-    _info "Scheduling  : nodeName=${OPT_NODE}"
+    if [[ "$GPU_MODE" == "vgpu" || "$GPU_MODE" == "svi" ]]; then
+        # vGPU/SVI are provisioned on demand by hami-scheduler + biren-mode-manager;
+        # nodeName bypasses the scheduler (no provisioning/allocation -> admission
+        # error). Pin via the hostname nodeSelector so the scheduler still runs.
+        SCHED_TYPE="label"; LABEL_KEY="kubernetes.io/hostname"; LABEL_VAL="${OPT_NODE}"
+        _warn "Scheduling  : --node + ${GPU_MODE} -> nodeSelector kubernetes.io/hostname=${OPT_NODE} (nodeName would bypass hami-scheduler)"
+    else
+        SCHED_TYPE="node"
+        _info "Scheduling  : nodeName=${OPT_NODE}"
+    fi
 elif [[ -n "$OPT_LABEL" ]]; then
     SCHED_TYPE="label"
     LABEL_KEY="${OPT_LABEL%%=*}"
@@ -499,12 +520,10 @@ spec:
         model: ${model_weights}
         framework: ${framework}
     spec:
-      # RuntimeClass 'biren' injects /dev/biren-m and the allocated /dev/biren/card_N
-      # devices (BirenTech Container Toolkit). The unified HAMi-Biren plugin places
-      # GPU pods via hami-scheduler (topology-aware; <=4 cards land in one 4-card
-      # high-speed interconnect group). No admission webhook -> schedulerName explicit.
-      runtimeClassName: biren
-${_hami_sched_deploy}
+      # whole-card uses RuntimeClass 'biren' (container-toolkit device injection);
+      # vGPU/SVI omit it (the HAMi device-plugin injects /dev/biren-m + the assigned
+      # card). GPU pods are placed by hami-scheduler (no admission webhook -> explicit).
+${_runtime_class_deploy}${_hami_sched_deploy}
 ${_sched_deploy}
       containers:
       - name: ${SERVER_CONTAINER}
@@ -598,11 +617,9 @@ metadata:
     model: ${model_weights}
     framework: ${framework}
 spec:
-  # RuntimeClass 'biren'; placed by hami-scheduler (topology-aware multi-card).
-  # Pod stays alive (sleep infinity); user enters via 'kubectl exec -it' and runs
-  # the server run script written by k8s_apply.sh.
-  runtimeClassName: biren
-${_hami_sched_pod}
+  # whole-card uses RuntimeClass 'biren'; vGPU/SVI omit it (HAMi injects devices).
+  # Placed by hami-scheduler. Pod stays alive (sleep infinity); exec in to run the server.
+${_runtime_class_pod}${_hami_sched_pod}
 ${_sched_pod}
   restartPolicy: Never
   containers:
