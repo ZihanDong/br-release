@@ -1,0 +1,51 @@
+================================================================================
+注意（br-release 补充）
+  1) 在线服务化（OpenAI 兼容 /v1/videos）已支持，无需改框架。见
+     README.md “Wan2.2 视频生成（video_gen 模式）”：
+       sudo bash run_docker.sh --run wan2.2-t2v-a14b
+       bash wan_video_client.sh --port 39000 --steps 4 --prompt "..." --size 832x480
+  2) cache-dit 必须装 1.3.4（最新 1.3.10 缺少 cache_dit.parallelism，会 ImportError）：
+       pip install --no-deps cache_dit==1.3.4
+  3) 权重必须是 HuggingFace diffusers 格式（含 model_index.json）。
+     /data/models/Wan-AI/Wan2.2-{T2V,I2V}-A14B 是 ModelScope 版
+     （high_noise_model/low_noise_model/*.pth），离线和在线都无法直接加载，
+     需使用 Wan-AI/Wan2.2-{T2V,I2V}-A14B-Diffusers。
+================================================================================
+
+容器内
+Wan2.2-T2V-A14B 模型  cfg2，8卡
+安装环境依赖
+python3 -m pip install cache-dit   # 注意：应为  pip install --no-deps cache_dit==1.3.4
+运行脚本，进行测试
+cd sglang-br/test/multimodal_gen/wan/offline/ 
+python3 testcase_wan.py --task t2v --prompt xxxxx --ckpt_path 模型路径  --size 640*480 --usp_degree 4 --ring_degree 1 --use_cfg --num_steps 40 --output_dir <视频目标地址> 2>&1 | tee <log目标目录地址及名字>
+Wan2.2-T2V-A14B 模型  ring2，8卡
+安装环境依赖
+python3 -m pip install cache-dit
+运行脚本，进行测试
+cd sglang-br/test/multimodal_gen/wan/offline/ 
+python3 testcase_wan.py --task t2v --prompt xxxxx --ckpt_path 模型路径  --size 640*480 --usp_degree 4 --ring_degree 2 --num_steps 40 --output_dir <视频目标地址> 2>&1 | tee <log目标目录地址及名字>
+Wan2.2-I2V-A14B 模型 cfg2，8卡
+安装环境依赖
+python3 -m pip install cache-dit
+运行脚本，进行测试
+cd sglang-br/test/multimodal_gen/wan/offline/
+python3 testcase_wan.py --task i2v --image xxx.jpg --prompt xxxxx --ckpt_path 模型路径  --size 640*480 --usp_degree 4 --ring_degree 1 --use_cfg --num_steps 40 --output_dir <视频目标地址> 2>&1 | tee <log目标目录地址及名字>
+Wan2.2-i2V-A14B 模型  ring2，8卡
+安装环境依赖
+python3 -m pip install cache-dit
+运行脚本，进行测试
+cd sglang-br/test/multimodal_gen/wan/offline/ 
+python3 testcase_wan.py --task i2v --image xxx.jpg --prompt xxxxx --ckpt_path 模型路径  --size 640*480 --usp_degree 4 --ring_degree 2 --num_steps 40 --output_dir <视频目标地址> 2>&1 | tee <log目标目录地址及名字>
+参数说明
+
+--task i2v	指定任务类型为
+--image	输入图片路径，作为视频首帧
+--prompt	文本提示词，描述期望生成的视频内容
+--ckpt_path	模型权重路径
+--size	输出分辨率（宽×高）
+--usp_degree	Ulysses 序列并行度 空间域序列并行，4 表示 4 路并行
+--ring_degree	Ring Attention 并行度 时序域并行，2 表示 2 路并行
+--num_steps	扩散推理步数
+--output_dir	视频输出目录
+2>&1 | tee	同时输出到终端和日志文件

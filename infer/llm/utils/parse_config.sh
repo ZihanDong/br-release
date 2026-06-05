@@ -69,6 +69,9 @@ _apply_defaults_vllm() {
 #   standard mode    required: model_weights, port, tensor_parallel_size,
 #                              max_model_len, max_running_requests
 #   multimodal_gen   required: model_weights, port, tensor_parallel_size
+#   video_gen        required: model_weights, port, tensor_parallel_size
+#                    (tensor_parallel_size = TOTAL cards/GPUs to allocate;
+#                     decomposed by ulysses_degree × ring_degree × cfg(×2))
 _apply_defaults_sglang() {
     launch_mode=standard
     pipeline_parallel_size=1
@@ -79,13 +82,18 @@ _apply_defaults_sglang() {
     max_model_len=""
     max_running_requests=""
     extra_sglang_args=""
-    # multimodal_gen-specific
+    # multimodal_gen / video_gen-specific
     output_path=./outputs/
     dit_cpu_offload=False
     dit_layerwise_offload=False
     image_encoder_cpu_offload=False
     text_encoder_cpu_offload=False
     vae_cpu_offload=False
+    # video_gen-specific (Wan2.2 etc.): sequence-parallel / CFG-parallel decomposition.
+    # Total GPUs (= tensor_parallel_size) = ulysses_degree × ring_degree × (enable_cfg_parallel ? 2 : 1)
+    ulysses_degree=1
+    ring_degree=1
+    enable_cfg_parallel=false
 }
 
 # ── Path resolution ─────────────────────────────────────────────────────────
@@ -129,9 +137,10 @@ _pc_validate() {
         vllm)
             req+=(max_model_len max_num_seqs) ;;
         sglang)
-            if [[ "${launch_mode:-standard}" != "multimodal_gen" ]]; then
-                req+=(max_model_len max_running_requests)
-            fi ;;
+            case "${launch_mode:-standard}" in
+                multimodal_gen|video_gen) : ;;  # diffusion modes: no KV-cache params
+                *) req+=(max_model_len max_running_requests) ;;
+            esac ;;
     esac
     for v in "${req[@]}"; do
         [[ -z "${!v:-}" ]] && missing+=("$v")
@@ -278,9 +287,16 @@ _cli_show() {
             echo "  task                    = ${task:-<chat>}" ;;
         sglang)
             echo "  launch_mode             = ${launch_mode}"
-            echo "  max_model_len           = ${max_model_len:-<n/a>}"
-            echo "  max_running_requests    = ${max_running_requests:-<n/a>}"
-            echo "  mem_fraction_static     = ${mem_fraction_static}" ;;
+            if [[ "${launch_mode}" == "video_gen" ]]; then
+                echo "  ulysses_degree          = ${ulysses_degree}"
+                echo "  ring_degree             = ${ring_degree}"
+                echo "  enable_cfg_parallel     = ${enable_cfg_parallel}"
+                echo "  output_path             = ${output_path}"
+            else
+                echo "  max_model_len           = ${max_model_len:-<n/a>}"
+                echo "  max_running_requests    = ${max_running_requests:-<n/a>}"
+                echo "  mem_fraction_static     = ${mem_fraction_static}"
+            fi ;;
     esac
 }
 

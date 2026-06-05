@@ -49,6 +49,10 @@ LLM_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"                    # .../infer/llm
 # shellcheck source=./parse_config.sh
 source "${SCRIPT_DIR}/parse_config.sh"
 
+# parse_image_list.sh provides parse_image_list (optional --env base-image selection).
+# shellcheck source=./parse_image_list.sh
+source "${SCRIPT_DIR}/parse_image_list.sh"
+
 # ── Framework defaults (used when a config omits k8s_image) ────────────────────
 _VLLM_K8S_IMAGE='172.25.198.36:32000/infer/birensupa-smartinfer-vllm:26.04.rc2-py310-pt2.8.0-br1xx'
 _SGLANG_K8S_IMAGE='172.25.198.36:32000/infer/birensupa-smartinfer-sglang:26.04.rc2-py310-pt2.9.0-br1xx'
@@ -83,6 +87,10 @@ usage() {
     echo "  Scale (deploy only):"
     echo "  --replicas <n>         Deployment replicas (default: 1)."
     echo ""
+    echo "  Base image (optional; default: image from the model config):"
+    echo "  --env <name>           Use a base image (+ in-container setup) from the image list."
+    echo "  --env-list <file>      Image-list file (default: <framework>/<framework>_images.list)."
+    echo ""
     echo "Available configs:"
     for f in "${CONFIGS_DIR}/"*.conf; do
         [[ -f "$f" ]] && echo "  $(basename "$f" .conf)"
@@ -103,10 +111,14 @@ OPT_GPU=false        # --gpu               whole card(s), count = tp*pp
 OPT_SVI=""           # --svi <1in2|1in4>   one SVI hard-partition instance
 OPT_VGPU_CORE=""     # --vgpu-core <1-32>  vGPU soft-partition SPC quota
 OPT_VGPU_MEM=""      # --vgpu-mem  <1-64>  vGPU soft-partition HBM quota (GiB)
+ENV_NAME=""          # --env <name>        base image from the framework image list
+ENV_LIST=""          # --env-list <file>   override the default image-list file
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --task)        [[ $# -lt 2 ]] && { _err "--task requires an argument (pod|deploy)"; usage; }; K8S_TYPE="$2"; shift 2 ;;
+        --env)         [[ $# -lt 2 ]] && { _err "--env requires a name argument"; usage; }; ENV_NAME="$2"; shift 2 ;;
+        --env-list)    [[ $# -lt 2 ]] && { _err "--env-list requires a file argument"; usage; }; ENV_LIST="$2"; shift 2 ;;
         --node)        [[ $# -lt 2 ]] && { _err "--node requires a nodename argument"; usage; }; OPT_NODE="$2"; shift 2 ;;
         --label)       [[ $# -lt 2 ]] && { _err "--label requires a key=value argument"; usage; }; OPT_LABEL="$2"; shift 2 ;;
         --cpu)         [[ $# -lt 2 ]] && { _err "--cpu requires a numeric argument"; usage; }; OPT_CPU="$2"; shift 2 ;;
@@ -166,16 +178,30 @@ case "$framework" in
         K8S_NAMESPACE="vllm"
         INNER_SCRIPT="${LLM_DIR}/vllm/vllm_server.sh"
         DEFAULT_IMAGE="$_VLLM_K8S_IMAGE"
+        DEFAULT_ENV_LIST="${LLM_DIR}/vllm/vllm_images.list"
         SERVER_CONTAINER="vllm-server" ;;
     sglang)
         K8S_NAMESPACE="sglang"
         INNER_SCRIPT="${LLM_DIR}/sglang/sglang_server.sh"
         DEFAULT_IMAGE="$_SGLANG_K8S_IMAGE"
+        DEFAULT_ENV_LIST="${LLM_DIR}/sglang/sglang_images.list"
         SERVER_CONTAINER="sglang-server" ;;
     *)
         _err "framework '${framework}' has no k8s generator support yet."; exit 1 ;;
 esac
 CONTAINER_IMAGE="${k8s_image:-$DEFAULT_IMAGE}"
+
+# ── Optional --env: base image (+ in-container setup) from the framework image list ──
+# Overrides the image; IMG_SETUP (if any) is prepended to the container's auto-run
+# command in the generated YAML (run before everything else). No --env -> unchanged.
+[[ -z "$ENV_LIST" ]] && ENV_LIST="$DEFAULT_ENV_LIST"
+ENV_SETUP=""
+if [[ -n "$ENV_NAME" ]]; then
+    parse_image_list "$ENV_LIST" "$ENV_NAME" || exit 1
+    CONTAINER_IMAGE="$IMG_NAME"
+    ENV_SETUP="$IMG_SETUP"
+    _info "Env         : ${ENV_NAME}  (${ENV_LIST##*/})${IMG_DESC:+  — ${IMG_DESC}}"
+fi
 
 [[ "$K8S_TYPE" == "deploy" && -z "${k8s_nodeport:-}" ]] && {
     _err "k8s_nodeport not set in $(basename "$CONFIG_FILE") (required for deploy type)"; exit 1; }
@@ -422,6 +448,18 @@ _pod_volumes="  volumes:
       medium: Memory
       sizeLimit: 256Gi"
 
+# ── Container args (optionally prepend --env setup before the auto-run command) ──
+# No 'command:' field is set, so the image ENTRYPOINT (biren_entrypoint.sh) runs
+# first and sets LD_LIBRARY_PATH, then exec's these args. With --env setup, the
+# args become a single `bash -c` so the setup runs before the server / idle loop.
+if [[ -n "$ENV_SETUP" ]]; then
+    ARGS_DEPLOY=$(printf '        args:\n        - bash\n        - -c\n        - "%s && exec bash %s %s"' "$ENV_SETUP" "$INNER_SCRIPT" "$CONFIG_FILE")
+    ARGS_POD=$(printf '    args:\n    - bash\n    - -c\n    - "%s; exec sleep infinity"' "$ENV_SETUP")
+else
+    ARGS_DEPLOY=$(printf '        args:\n        - bash\n        - "%s"\n        - "%s"' "$INNER_SCRIPT" "$CONFIG_FILE")
+    ARGS_POD=$(printf '    args:\n    - sleep\n    - infinity')
+fi
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Write YAML
 # ══════════════════════════════════════════════════════════════════════════════
@@ -474,10 +512,7 @@ ${_sched_deploy}
         imagePullPolicy: IfNotPresent
         # No 'command' field — preserves the image ENTRYPOINT (biren_entrypoint.sh),
         # which sets LD_LIBRARY_PATH before exec'ing the args.
-        args:
-        - bash
-        - "${INNER_SCRIPT}"
-        - "${CONFIG_FILE}"
+${ARGS_DEPLOY}
         env:
 ${ENV_DEPLOY}
         ports:
@@ -575,9 +610,7 @@ ${_sched_pod}
     image: ${CONTAINER_IMAGE}
     imagePullPolicy: IfNotPresent
     # No 'command' — preserves ENTRYPOINT (biren_entrypoint.sh) for LD_LIBRARY_PATH setup.
-    args:
-    - sleep
-    - infinity
+${ARGS_POD}
     env:
 ${ENV_POD}
     resources:

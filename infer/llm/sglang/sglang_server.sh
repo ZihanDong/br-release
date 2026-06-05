@@ -46,6 +46,8 @@ parse_config "$1" sglang || usage
 _info "Config      : $(basename "$CONFIG_FILE")"
 if [[ "${launch_mode}" == "multimodal_gen" ]]; then
     _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  [multimodal_gen]"
+elif [[ "${launch_mode}" == "video_gen" ]]; then
+    _info "Model key   : $model_weights  |  port=$port  |  gpus=$tensor_parallel_size  usp=$ulysses_degree ring=$ring_degree cfg=$enable_cfg_parallel  [video_gen]"
 else
     _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
 fi
@@ -63,74 +65,22 @@ _info "Registry    : path=$MODEL_LOCAL_PATH  download=$DOWNLOAD_NAME  status=$DI
     _err "Download weights to the host before launching the container."; exit 1; }
 _ok "Weights     : ${MODEL_LOCAL_PATH}"
 
-# ── BirenTech env vars ─────────────────────────────────────────────────────────
-if [[ "${launch_mode}" == "multimodal_gen" ]]; then
-    # Image generation backend requires different BRTB flags (set inside run_qwen-image.sh)
-    export BRTB_ENABLE_SUPA_FALLBACK=1
-    export BRTB_ENABLE_NCDHW=1
-    export BRTB_ENABLE_FORCE_EAGER_CONV2D=1
-    export SUDNN_EAGER_ENABLE_ALPHA_BETA=false
-else
-    export BRTB_PLAN_ID_RENEW=1
-    export BRTB_DISABLE_ZERO_REORDER=1
-    export BRTB_DISABLE_ZERO_OUTPUT_NUMA=1
-    export BRTB_DISABLE_ZERO_OUTPUT_UMA=1
-    export BRTB_DISABLE_ZERO_WS=1
-    export BRTB_DISABLE_L2_FLUSH=1
-    export BRTB_ENABLE_SUPA_FILL=1
-fi
+# ── Build the launch (env + pre-steps + command) from the shared launch library ─
+# sglang_launch.sh is the SINGLE source of truth for the launch_mode branching
+# (standard LLM / multimodal_gen image / video_gen). run_docker.sh sources the same
+# library and bakes the identical launch into its run script, so Docker and k8s
+# (this script is the k8s INNER_SCRIPT) start servers identically.
+# shellcheck source=./sglang_launch.sh
+source "${SCRIPT_DIR}/sglang_launch.sh"
+sglang_build_launch
 
-# Extra model-specific env vars (space-separated KEY=VALUE pairs from conf)
-if [[ -n "${extra_env:-}" ]]; then
-    for _kv in ${extra_env}; do
-        export "$_kv"
-    done
-fi
-
-# ── Build launch args array ────────────────────────────────────────────────────
-if [[ "${launch_mode}" == "multimodal_gen" ]]; then
-    mkdir -p "${output_path}"
-    sglang_args=(
-        python3 "${SCRIPT_DIR}/run_qwen-image.sh"
-        --model-path "${MODEL_LOCAL_PATH}"
-        --num-gpus "${tensor_parallel_size}"
-        --tp-size "${tensor_parallel_size}"
-        --host 0.0.0.0
-        --port "${port}"
-        --output-path "${output_path}"
-        --dit-cpu-offload "${dit_cpu_offload}"
-        --dit-layerwise-offload "${dit_layerwise_offload}"
-        --image-encoder-cpu-offload "${image_encoder_cpu_offload}"
-        --text-encoder-cpu-offload "${text_encoder_cpu_offload}"
-        --vae-cpu-offload "${vae_cpu_offload}"
-    )
-    [[ -n "$served_model_name" ]] && sglang_args+=(--served-model-name "${served_model_name}")
-else
-    sglang_args=(
-        python3 -m sglang.launch_server
-        --host 0.0.0.0
-        --port "${port}"
-        --model-path "${MODEL_LOCAL_PATH}"
-        --tp-size "${tensor_parallel_size}"
-        --pp-size "${pipeline_parallel_size}"
-        --mem-fraction-static "${mem_fraction_static}"
-        --max-model-len "${max_model_len}"
-        --max-running-requests "${max_running_requests}"
-        --page-size "${page_size}"
-    )
-    [[ "$trust_remote_code" == "true" ]] && sglang_args+=(--trust-remote-code)
-    [[ "$disable_radix_cache" == "true" ]] && sglang_args+=(--disable-radix-cache)
-    [[ -n "$served_model_name" ]]          && sglang_args+=(--served-model-name "${served_model_name}")
-fi
-
-# Extra model-specific sglang flags (e.g. --enable-mixed-chunk)
-if [[ -n "${extra_sglang_args:-}" ]]; then
-    read -ra _extra_arr <<< "${extra_sglang_args}"
-    sglang_args+=("${_extra_arr[@]}")
-fi
+# Export mode-specific BirenTech env (+ conf extra_env), then run pre-launch steps
+# (mkdir outputs / source base env / ensure deps), if any.
+for _kv in "${LAUNCH_ENV[@]}"; do export "$_kv"; done
+[[ -n "$LAUNCH_PRE" ]] && eval "$LAUNCH_PRE"
 
 # ── Launch ─────────────────────────────────────────────────────────────────────
-_ok "Launching   : ${sglang_args[*]}"
+_ok "Launching   : ${LAUNCH_CMD[*]}"
 echo ""
 
-exec "${sglang_args[@]}"
+exec "${LAUNCH_CMD[@]}"

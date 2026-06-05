@@ -59,10 +59,12 @@ infer/llm/
 │   ├── pod/  deploy/             # k8s_yaml_gen.sh 产物
 ├── utils/                # 跨框架工具：parse_config.sh / k8s_yaml_gen.sh / k8s_apply.sh / conf_gen.sh
 └── sglang/
-    ├── sglang_server.sh      # 容器内脚本：parse_config → 查 registry → exec sglang
-    ├── run_docker.sh         # Docker 外层：GPU 选择 + 端口检查 + 容器启动；默认交互式，--run 直接拉起 server
-    ├── run_qwen-image.sh     # 多模态图像生成入口（launch_mode=multimodal_gen）
-    └── logs/                 # 启动日志（自动生成）
+    ├── sglang_server.sh        # 容器内启动器：parse_config → 查 registry → 经 sglang_launch.sh 拉起
+    ├── sglang_launch.sh        # 启动逻辑单一来源：按 launch_mode 分支 env + 命令（docker/k8s 共用）
+    ├── run_docker.sh           # Docker 外层：GPU 选择 + 端口检查 + 容器启动；默认交互式，--run 直接拉起 server
+    ├── launch_multimodal_gen.py # multimodal_gen 通用入口（图像 + Wan 视频共用），spawn 安全；类比 LLM 的 python3 -m sglang.launch_server
+    ├── wan_video_client.sh     # Wan2.2 视频测试客户端（POST /v1/videos → 轮询 → 下载）
+    └── logs/                   # 启动日志（自动生成）
 ```
 
 ---
@@ -110,7 +112,7 @@ sudo docker push 172.25.198.36:32000/infer/birensupa-smartinfer-sglang:26.04.rc2
 
 ```bash
 cd infer/llm/sglang
-sudo bash run_docker.sh [--run] <config>
+sudo bash run_docker.sh [--run] [--env <name>] [--env-list <file>] <config>
 ```
 
 `<config>` 支持三种形式：
@@ -119,6 +121,14 @@ sudo bash run_docker.sh [--run] <config>
 sudo bash run_docker.sh qwen3-vl-32b                    # 裸模型名
 sudo bash run_docker.sh configs/qwen3-vl-32b.conf       # 相对路径
 sudo bash run_docker.sh /abs/path/to/custom.conf         # 绝对路径
+```
+
+`--env <name>`（可选）从镜像清单 `sglang_images.list` 选一个基础镜像并执行其 `setup`
+（容器启动后自动 `docker exec`），用于装齐镜像缺失的依赖；不带则用配置里的 `docker_image`、不做额外操作。
+详见下文「§3.3 镜像清单」。Qwen-Image 必须带 `--env`（装 `cache_dit`）：
+
+```bash
+sudo bash run_docker.sh --run --env 2604-rc2 qwen-image   # 装 cache_dit 后拉起图像生成服务
 ```
 
 ### 1.2 两种运行模式
@@ -213,6 +223,15 @@ bash utils/k8s_apply.sh configs/pod/sglang_qwen3-vl-32b-pod-node-brhost-01-p2880
 # bash run_sglang_qwen3-vl-32b_server.sh
 ```
 
+**带 `--env`（缺失依赖场景，如 Qwen-Image）：** `setup` 会被拼到容器自动运行命令最前面
+（deploy：`<setup> && exec bash sglang_server.sh <conf>`；pod：`<setup>; exec sleep infinity`）。
+
+```bash
+bash utils/k8s_yaml_gen.sh --task deploy --gpu --node brhost-01 --env 2604-rc2 sglang_qwen-image
+# k8s 用清单镜像名时需先让集群可达（push registry / ctr import 进节点 containerd），否则 ImagePullBackOff
+bash utils/k8s_apply.sh configs/deploy/sglang_qwen-image-deploy-node-brhost-01-p38000-r1.yaml
+```
+
 ### 2.4 `k8s_yaml_gen.sh` 选项
 
 ```
@@ -228,6 +247,10 @@ bash k8s_yaml_gen.sh --task <pod|deploy> [选项] <config>
 
 副本选项（仅 deploy）：
   --replicas <n>         副本数（默认 1）
+
+基础镜像（可选；缺省用配置里的 k8s_image）：
+  --env <name>           从 sglang_images.list 选基础镜像 + 注入其 setup 步骤
+  --env-list <file>      指定清单文件（默认 sglang/sglang_images.list）
 ```
 
 输出文件命名规则：
@@ -240,6 +263,9 @@ configs/{pod,deploy}/sglang_<model>-<type>[-svi-…|-vgpu-…][-node-<n>|-label-
 | 模型 | containerPort | NodePort | 访问地址 |
 |------|--------------|----------|---------|
 | qwen3-vl-32b | 28800 | **30900** | `http://<node-ip>:30900` |
+| qwen-image | 38000 | **30901** | `http://<node-ip>:30901` |
+| wan2.2-t2v-a14b | 39000 | **30902** | `http://<node-ip>:30902` |
+| wan2.2-i2v-a14b | 39001 | **30903** | `http://<node-ip>:30903` |
 
 ### 2.6 监控
 
@@ -301,6 +327,25 @@ local_path=${ROOT_PATH}/Qwen/Qwen3-VL-32B-Instruct
 download_name=Qwen/Qwen3-VL-32B-Instruct
 ```
 
+### 3.3 镜像清单（`sglang_images.list`，配合 `--env`）
+
+把「镜像缺失依赖的安装步骤」从脚本里挪到声明式清单（`utils/parse_image_list.sh` 解析），
+`run_docker.sh` / `k8s_yaml_gen.sh` 用 `--env <name>` 选用。每段：
+
+```ini
+[2604-rc2]                                                                # --env 检索名
+image = birensupa-smartinfer-sglang:26.06.02-c059s001t004b24295-...        # 镜像名
+desc  = 26.06 RC2 multimodal_gen build; Qwen-Image needs cache_dit          # 描述
+setup = python3 -m pip install --no-input cache-dit==1.3.4                   # 容器内步骤；可多行(重复 setup=，按 && 串联)，留空不执行
+```
+
+执行时机：Docker 容器启动后 `docker exec`；k8s 拼到容器自动运行命令最前。`#` 开头为注释；
+`setup` 命令里勿用双引号（k8s 会把它放进双引号 YAML 参数）。**Qwen-Image** 的 cache_dit 即由此提供，
+所以不再需要在 `sglang_server.sh` 里写依赖安装逻辑。
+
+> k8s 用清单里的裸镜像名时，containerd 会按 `docker.io/library/<image>` 解析；务必先 push 到内网
+> registry 或 `sudo ctr -n k8s.io images import` 进目标节点，否则 `ImagePullBackOff`。
+
 ---
 
 ## 四、新增模型
@@ -326,7 +371,110 @@ bash utils/k8s_apply.sh configs/pod/sglang_my-model-pod-p<port>.yaml
 
 ---
 
-## 五、常见问题
+## 五、Wan2.2 视频生成（video_gen 模式）
+
+Wan2.2（T2V / I2V）走 `launch_mode=video_gen`：在线服务用的是和离线
+`testcase_wan.py` **完全相同**的 `sglang.multimodal_gen` 运行时
+——离线 `DiffGenerator` 调 `launch_server(..., launch_http_server=False)`，
+在线只是 `launch_http_server=True`，多出 OpenAI 兼容的 `/v1/videos` 端点，
+**无需修改框架**。容器内入口为 `server_sglang_video.sh`（Python，与图像入口
+`launch_multimodal_gen.py` 同类），由 `sglang_launch.sh` 的 video_gen 分支构建命令、
+经 `sglang_server.sh` 拉起。
+
+### 5.1 前置：权重格式 + 依赖
+
+- **权重必须是 diffusers 格式**（目录含 `model_index.json`）：
+  `Wan-AI/Wan2.2-T2V-A14B-Diffusers` / `Wan-AI/Wan2.2-I2V-A14B-Diffusers`。
+  ModelScope 版（`high_noise_model/low_noise_model/*.pth`，无 `model_index.json`）
+  **离线、在线都无法直接加载**。`model_registry.conf` 已登记 `-Diffusers` 路径。
+- **cache_dit 必须是 1.3.4**（镜像未预装；最新 1.3.10 缺 `cache_dit.parallelism`）：
+  `pip install --no-deps cache_dit==1.3.4`。video_gen 启动时（`sglang_launch.sh` 的 LAUNCH_PRE）已自动安装。
+- **专用镜像必须用 c064（Wan 自己的构建）**：
+  `birensupa-smartinfer-sglang:26.06.02-c064s001t001b24295-py310-pt2.9.0-br1xx`
+  （`docker load -i /data/release/siming-0602/birensupa-smartinfer-sglang-26.06.02-c064*.tar`）。
+  **不要用 c059**（qwen-image 的构建）——它跑不了 Wan 的 UMT5 文本编码器（`RMSNormInfer` /
+  `Colmajor 2D` 报错）。
+
+下面这些 Wan 专属坑已在脚本里**自动处理**（无需手动操作），列出以备排障：
+
+- **`br_generator` / PYTHONPATH**：VAE decode 时 SUDNN 要 JIT 编译卷积核，需 import
+  `br_generator`（在 SDK 的 `.../sulib/lib`，由镜像 ENTRYPOINT 写进 PID1 的 PYTHONPATH）。
+  但 `docker exec` 不继承 ENTRYPOINT 环境，缺它会 `No module named 'br_generator'` → SUDNN
+  `build graph failed`。`run_docker.sh` 的 run script 现在把 **PID1 整套环境**（PYTHONPATH/
+  LD_LIBRARY_PATH/PATH…）透传进来，不再只传 LD_LIBRARY_PATH。**离线 / 在线同此坑**。
+- **VAE 用 bf16 + 关并行 decode**：`sglang_launch.sh` 给 video_gen 加 `--vae-precision bf16`；
+  `launch_multimodal_gen.py` 对 Wan 管线把 `vae_config.use_parallel_{encode,decode}=False`
+  （否则分别 `SliceNcdhwDAxis` 无后端 / `split_for_parallel_decode` 未定义）。与离线
+  `testcase_wan.py` 的 `vae_config` 一致。
+- **文本编码器在 GPU**（`text_encoder_cpu_offload=False`，c064 上 RMSNorm 正常）；本地 7890
+  代理会把 `127.0.0.1:39000` 变 502，`wan_video_client.sh` 已自动 `no_proxy` 绕过。
+
+> 验证：4 步 t2v 在线全链路已跑通（c064，4 卡 cfg2，832×480 → mp4；首次 ~207s，含 VAE 核 JIT 编译）。
+> 8 卡 cfg2 t2v / i2v 也各自跑通**首个请求**（1280×720，10 步：t2v infer≈385s / i2v≈791s，峰值≈63GB）。
+
+> ⚠️ **已知限制 — 多请求**：当前 c064 构建里，**同一 server 的第 2 个请求会失败**
+> （`PtOpIRBuilder: Input is not on SUPA and not host scalar!`，发生在 TextEncodingStage 的
+> embedding）。根因是第 1 个请求里 dit/vae 的 CPU offload 把 SUPA 设备态搞乱，第 2 个请求
+> 取 `input_ids` 时落在 host 上。离线 `testcase_wan.py` 每次新进程跑一个生成，从不复用，所以
+> 碰不到——这是**有状态在线服务路径**才暴露的 vendor runtime bug。`text_encoder_cpu_offload=True`
+> 反而让第 1 个请求也挂；offload 又因 28B 模型在 65GB 卡上放不下而无法关闭。**单请求可用；多请求
+> 待 BirenTech / sglang-br 修**（每请求重置 SUPA 设备上下文 / 修复 offload 后的设备态）。性能压测
+> 脚本 `wan_video_perf.sh` 因此只能拿到 warm-up（首请求，含 JIT 编译）的数。
+
+### 5.2 并行度（config 字段）
+
+`tensor_parallel_size` = **要分配的总卡数**，必须等于
+`ulysses_degree × ring_degree × (enable_cfg_parallel ? 2 : 1)`；模型内部 TP 固定为 1。
+8 卡两种布局：
+
+| 布局 | ulysses_degree | ring_degree | enable_cfg_parallel | 总卡 |
+|------|----------------|-------------|---------------------|------|
+| **cfg2（默认）** | 4 | 1 | true  | 8 |
+| ring2 | 4 | 2 | false | 8 |
+
+t2v / i2v 由权重的 `model_index.json` 自动判别，无需任务参数；i2v 请求必须带输入图。
+扩散步数、prompt、分辨率、首帧图都是**逐请求**参数（`POST /v1/videos`），不是启动参数。
+
+### 5.3 启动 + 4 步快速验证
+
+```bash
+cd infer/llm/sglang
+
+# 直接拉起 t2v 服务（宿主机轮询 /health，就绪后打印测试命令）
+sudo bash run_docker.sh --run wan2.2-t2v-a14b
+
+# 4 步冒烟（t2v）
+bash wan_video_client.sh --port 39000 --steps 4 \
+  --prompt "a white cat wearing sunglasses on a surfboard" --size 832x480
+
+# i2v：换 wan2.2-i2v-a14b（端口 39001），请求带首帧图
+sudo bash run_docker.sh --run wan2.2-i2v-a14b
+bash wan_video_client.sh --port 39001 --steps 4 --image /path/to/first.jpg \
+  --prompt "the cat turns its head and smiles"
+```
+
+`wan_video_client.sh` 提交任务 → 轮询 `GET /v1/videos/<id>` → 完成后从
+`/v1/videos/<id>/content` 下载 mp4（服务端也会存到 `output_path`）。
+
+### 5.4 直接 curl
+
+```bash
+# 提交（t2v，4 步）
+curl -s -X POST http://127.0.0.1:39000/v1/videos -H 'Content-Type: application/json' \
+  -d '{"prompt":"a white cat on a surfboard","size":"832x480","num_inference_steps":4,"num_frames":81,"seed":1024}'
+# → {"id":"<vid>","status":"queued",...}
+
+# 轮询 / 下载
+curl -s http://127.0.0.1:39000/v1/videos/<vid> | python3 -m json.tool
+curl -s http://127.0.0.1:39000/v1/videos/<vid>/content -o out.mp4
+```
+
+> i2v 请求加 `"reference_url":"/abs/path/first.jpg"`（或 `input_reference`）；
+> 缺图会被服务端拒绝（400）。`num_frames-1` 须能被 4 整除（81、61、21…）。
+
+---
+
+## 六、常见问题
 
 ### Docker 方式
 

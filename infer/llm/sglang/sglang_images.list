@@ -1,0 +1,20 @@
+# SGLang base images — selectable via:
+#   run_docker.sh     --env <name> [--env-list <file>]
+#   k8s_yaml_gen.sh   --env <name> [--env-list <file>]
+# Parsed by utils/parse_image_list.sh. Both flags are OPTIONAL: without --env the
+# image from the model config (docker_image / k8s_image) is used and no setup runs.
+#
+# Per section ([<name>] is the retrieval name passed to --env):
+#   image = local docker image[:tag] to run (also the image ref written into k8s YAML)
+#   desc  = one-line description (optional)
+#   setup = shell command run INSIDE the container before the server starts.
+#           run_docker: exec'd right after the container starts.
+#           k8s:        prepended to the container's auto-run command (before all else).
+#           Repeat 'setup =' for multiple steps (joined with ' && '). Omit for none.
+#           NB: for k8s the image must also be reachable by the cluster (pushed to the
+#           registry or imported into the node's containerd).
+
+[2604-rc2]
+image = birensupa-smartinfer-sglang:26.06.02-c059s001t004b24295-py310-pt2.9.0-br1xx
+desc  = 26.06 RC2 sglang multimodal_gen build (diffusers 0.37.1 w/ AutoModel). Qwen-Image needs cache_dit installed.
+setup = python3 -m pip install --no-input cache-dit==1.3.4

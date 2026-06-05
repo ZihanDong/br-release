@@ -40,6 +40,14 @@ _err()  { echo -e "\033[0;31m[ERR ]\033[0m  $*" >&2; }
 # shellcheck source=../utils/parse_config.sh
 source "${LLM_DIR}/utils/parse_config.sh"
 
+# parse_image_list.sh provides parse_image_list (optional --env base-image selection).
+# shellcheck source=../utils/parse_image_list.sh
+source "${LLM_DIR}/utils/parse_image_list.sh"
+
+# Default image-list file for this framework (override with --env-list).
+ENV_LIST="${SCRIPT_DIR}/sglang_images.list"
+ENV_NAME=""
+
 DOCKER_CMD="docker"
 if ! docker info &>/dev/null 2>&1; then
     if sudo -n docker info &>/dev/null 2>&1; then
@@ -52,15 +60,22 @@ fi
 
 usage() {
     echo ""
-    echo "Usage: $0 [--run] <config_ref>"
+    echo "Usage: $0 [--run] [--env <name>] [--env-list <file>] <config_ref>"
     echo ""
-    echo "  (default)  Enter interactive shell; start server manually inside"
-    echo "  --run      Write run script then exec server directly (no interactive shell)"
+    echo "  (default)   Enter interactive shell; start server manually inside"
+    echo "  --run       Write run script then exec server directly (no interactive shell)"
+    echo "  --env       Pick a base image (+ in-container setup) from the image list"
+    echo "  --env-list  Image-list file (default: ${ENV_LIST})"
     echo ""
     echo "Available SGLang configs:"
     for f in "${LLM_DIR}/configs/"sglang_*.conf; do
         [[ -f "$f" ]] && echo "  $(basename "$f" .conf)"
     done
+    if [[ -f "$ENV_LIST" ]]; then
+        echo ""
+        echo "Available --env entries (${ENV_LIST}):"
+        list_image_envs "$ENV_LIST"
+    fi
     echo ""
     exit 1
 }
@@ -71,9 +86,11 @@ CONFIG_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --run) RUN_MODE=true; shift ;;
-        -*)    _err "Unknown option: $1"; usage ;;
-        *)     CONFIG_ARG="$1"; shift ;;
+        --run)      RUN_MODE=true; shift ;;
+        --env)      [[ $# -lt 2 ]] && { _err "--env requires a name argument"; usage; }; ENV_NAME="$2"; shift 2 ;;
+        --env-list) [[ $# -lt 2 ]] && { _err "--env-list requires a file argument"; usage; }; ENV_LIST="$2"; shift 2 ;;
+        -*)         _err "Unknown option: $1"; usage ;;
+        *)          CONFIG_ARG="$1"; shift ;;
     esac
 done
 
@@ -83,9 +100,22 @@ done
 parse_config "$CONFIG_ARG" sglang || usage
 [[ -n "${docker_image:-}" ]] && CONTAINER_IMAGE="$docker_image"
 
+# ── Optional --env: base image (+ in-container setup) from the image list ──────
+# Overrides the config's docker_image; the setup runs inside the container right
+# after it starts (below), bringing the image up to a model-runnable state.
+ENV_SETUP=""
+if [[ -n "$ENV_NAME" ]]; then
+    parse_image_list "$ENV_LIST" "$ENV_NAME" || exit 1
+    CONTAINER_IMAGE="$IMG_NAME"
+    ENV_SETUP="$IMG_SETUP"
+    _info "Env         : ${ENV_NAME}  (${ENV_LIST##*/})${IMG_DESC:+  — ${IMG_DESC}}"
+fi
+
 _info "Config      : $(basename "$CONFIG_FILE")  [mode=$( $RUN_MODE && echo --run || echo interactive)]"
 if [[ "${launch_mode}" == "multimodal_gen" ]]; then
     _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  [multimodal_gen]"
+elif [[ "${launch_mode}" == "video_gen" ]]; then
+    _info "Model key   : $model_weights  |  port=$port  |  gpus=$tensor_parallel_size  usp=$ulysses_degree ring=$ring_degree cfg=$enable_cfg_parallel  [video_gen]"
 else
     _info "Model key   : $model_weights  |  port=$port  |  tp=$tensor_parallel_size  pp=$pipeline_parallel_size"
 fi
@@ -129,12 +159,15 @@ else
 fi
 
 # ── GPU selection ──────────────────────────────────────────────────────────────
-if [[ "${launch_mode}" == "multimodal_gen" ]]; then
+# Diffusion modes (multimodal_gen / video_gen) treat tensor_parallel_size as the
+# TOTAL card count; standard mode needs tp × pp cards.
+if [[ "${launch_mode}" == "multimodal_gen" || "${launch_mode}" == "video_gen" ]]; then
     gpu_needed=$tensor_parallel_size
+    _info "GPU needed  : $gpu_needed (total cards, ${launch_mode})"
 else
     gpu_needed=$((tensor_parallel_size * pipeline_parallel_size))
+    _info "GPU needed  : tp=$tensor_parallel_size × pp=$pipeline_parallel_size = $gpu_needed"
 fi
-_info "GPU needed  : tp=$tensor_parallel_size × pp=$pipeline_parallel_size = $gpu_needed"
 
 mapfile -t free_gpus < <(
     brsmi gpu --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
@@ -163,7 +196,6 @@ ensure_dir "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 LOG_FILE="${LOG_DIR}/sglang_${model_weights}_${TIMESTAMP}.log"
 CONTAINER_NAME="sglang_${model_weights}"
-INNER_SCRIPT="${SCRIPT_DIR}/sglang_server.sh"
 
 if $DOCKER_CMD inspect "$CONTAINER_NAME" &>/dev/null; then
     _warn "Removing existing container: $CONTAINER_NAME"
@@ -199,15 +231,37 @@ $DOCKER_CMD run -d \
 _ok "Container started."
 echo ""
 
+# ── Optional --env in-container setup (bring the image up to a runnable state) ──
+if [[ -n "${ENV_SETUP:-}" ]]; then
+    _info "Env setup   : ${ENV_SETUP}"
+    if $DOCKER_CMD exec "$CONTAINER_NAME" bash -c "${ENV_SETUP}"; then
+        _ok "Env setup complete."
+    else
+        rc=$?; _err "Env setup failed (exit ${rc}). Removing container."
+        $DOCKER_CMD rm -f "$CONTAINER_NAME" >/dev/null 2>&1; exit 1
+    fi
+    echo ""
+fi
+
 # ── Write server run script into LOG_DIR ──────────────────────────────────────
+# The launch_mode branching (standard LLM / multimodal_gen / video_gen) lives in
+# the in-container launcher sglang_server.sh (via the shared sglang_launch.sh
+# library), which is also the k8s INNER_SCRIPT — so Docker and k8s start servers
+# identically. multimodal_gen launches via launch_multimodal_gen.py (spawn-safe),
+# mirroring the LLM `python3 -m sglang.launch_server` style.
+INNER_SCRIPT="${SCRIPT_DIR}/sglang_server.sh"
 RUN_SCRIPT_NAME="run_sglang_${model_weights}_server.sh"
 RUN_SCRIPT_PATH="${LOG_DIR}/${RUN_SCRIPT_NAME}"
 
 cat > "${RUN_SCRIPT_PATH}" <<'RUNSCRIPT'
 #!/usr/bin/env bash
-_ld=$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^LD_LIBRARY_PATH=//p' | head -1)
-[[ -n "$_ld" ]] && export LD_LIBRARY_PATH="$_ld"
-unset _ld
+# Inherit the BirenTech entrypoint env (PYTHONPATH / LD_LIBRARY_PATH / PATH / …)
+# that biren_entrypoint.sh set on PID 1. `docker exec` does NOT inherit it, and
+# the SUDNN JIT compiler needs PYTHONPATH (sdk .../sulib/lib → br_generator) or
+# VAE-decode kernel compilation fails ("No module named 'br_generator'" →
+# SUDNN "build graph failed"). Propagate the whole PID-1 environ, not just LD path.
+while IFS= read -r -d '' _kv; do export "$_kv"; done < /proc/1/environ
+unset _kv
 exec bash "__INNER_SCRIPT__" "__CONFIG_FILE__"
 RUNSCRIPT
 sed -i "s|__INNER_SCRIPT__|${INNER_SCRIPT}|g; s|__CONFIG_FILE__|${CONFIG_FILE}|g" "${RUN_SCRIPT_PATH}"
@@ -251,11 +305,18 @@ if $RUN_MODE; then
     fi
 
     echo ""
-    echo "── Chat completion test ───────────────────────────────────"
-    echo "curl -s http://127.0.0.1:${port}/v1/chat/completions \\"
-    echo "  -H 'Content-Type: application/json' \\"
-    echo "  -d '{\"model\": \"${MODEL_API}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}], \"max_tokens\": 64}' \\"
-    echo "  | python3 -m json.tool"
+    if [[ "${launch_mode}" == "video_gen" ]]; then
+        echo "── Wan2.2 video test (4-step quick check) ─────────────────"
+        echo "  bash ${SCRIPT_DIR}/wan_video_client.sh --port ${port} --steps 4 \\"
+        echo "    --prompt 'a white cat wearing sunglasses on a surfboard' --size 832x480"
+        echo "  # i2v: add  --image /path/to/first_frame.jpg"
+    else
+        echo "── Chat completion test ───────────────────────────────────"
+        echo "curl -s http://127.0.0.1:${port}/v1/chat/completions \\"
+        echo "  -H 'Content-Type: application/json' \\"
+        echo "  -d '{\"model\": \"${MODEL_API}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}], \"max_tokens\": 64}' \\"
+        echo "  | python3 -m json.tool"
+    fi
 
     echo ""
     echo "── Container management ──────────────────────────────────"
@@ -271,9 +332,10 @@ else
 
     _env_tmp=$(mktemp /tmp/sglang_docker_env_XXXXXX.sh)
     cat > "$_env_tmp" <<ENVSCRIPT
-_ld=\$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^LD_LIBRARY_PATH=//p' | head -1)
-[[ -n "\$_ld" ]] && export LD_LIBRARY_PATH="\$_ld"
-unset _ld
+# Inherit the full BirenTech entrypoint env from PID 1 (PYTHONPATH for br_generator,
+# LD_LIBRARY_PATH, PATH, …) — docker exec does not get it. See run-script note above.
+while IFS= read -r -d '' _kv; do export "\$_kv"; done < /proc/1/environ
+unset _kv
 cd '${LOG_DIR}'
 echo ""
 echo "  Docker shell — SGLang interactive session"
