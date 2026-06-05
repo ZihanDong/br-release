@@ -4,11 +4,13 @@
 # and reports timing (wall / server inference_time_s / per-step) over --runs iterations.
 #
 # t2v, 2 runs, 1280x720, 20 steps:
-#   bash wan_video_client.sh --port 39000 --steps 20 --size 1280x720 --runs 2
+#   bash wan_video_client.sh --task t2v --port 39000 --steps 20 --size 1280x720 --runs 2
 #
-# i2v (server launched with an -I2V- model): supply a first-frame image
-#   bash wan_video_client.sh --port 39001 --steps 20 --size 1280x720 --runs 2 \
-#       --image ./i2v_input.JPG
+# i2v (server must be an -I2V- model): --task i2v + a first-frame image
+#   bash wan_video_client.sh --task i2v --port 39001 --steps 40 --size 1280x720 --runs 1 \
+#       --image ./i2v_input.JPG --out /data/final/wan2.2-0606/i2v.mp4
+#
+# --task is optional: if omitted it defaults to i2v when --image is given, else t2v.
 #
 # Each run downloads its mp4 (via /v1/videos/<id>/content) to <out>_run<N>.mp4.
 # NOTE: the current c064 build has a multi-request bug — only the FIRST request on a
@@ -30,6 +32,7 @@ STEPS=4
 FRAMES=81
 SEED=1024
 RUNS=1
+TASK=""          # t2v | i2v ; if empty, inferred from --image
 IMAGE=""
 NEGATIVE=""
 OUT=""
@@ -53,7 +56,9 @@ Usage: $0 [options]
   --frames <n>      num_frames; (frames-1) must be divisible by 4 (default 81)
   --seed <n>        Seed (default 1024)
   --runs <n>        Number of timed generations to run (default 1)
-  --image <path>    First-frame image path for i2v (omit for t2v)
+  --task <t2v|i2v>  Task type (default: i2v if --image given, else t2v).
+                    i2v requires --image; the server must be an -I2V- model.
+  --image <path>    First-frame image path for i2v (required for --task i2v)
   --negative <txt>  Negative prompt (optional; model has a default)
   --out <file>      Base download path; runs save to <out_without_ext>_run<N>.mp4
   --timeout <sec>   Max seconds to poll per run (default 3600)
@@ -71,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         --frames)   FRAMES="$2"; shift 2 ;;
         --seed)     SEED="$2"; shift 2 ;;
         --runs)     RUNS="$2"; shift 2 ;;
+        --task)     TASK="$2"; shift 2 ;;
         --image)    IMAGE="$2"; shift 2 ;;
         --negative) NEGATIVE="$2"; shift 2 ;;
         --out)      OUT="$2"; shift 2 ;;
@@ -83,8 +89,18 @@ done
 BASE="http://${HOST}:${PORT}"
 command -v jq >/dev/null 2>&1 || { _err "jq is required (apt-get install jq)."; exit 1; }
 
+# Resolve task: explicit --task wins; otherwise infer from --image presence.
+if [[ -z "$TASK" ]]; then
+    TASK=$([[ -n "$IMAGE" ]] && echo i2v || echo t2v)
+fi
+case "$TASK" in
+    t2v) ;;
+    i2v) [[ -n "$IMAGE" ]] || { _err "--task i2v requires --image <first-frame.jpg>"; exit 1; } ;;
+    *)   _err "Invalid --task '$TASK' (expected t2v or i2v)"; exit 1 ;;
+esac
+[[ "$TASK" == "t2v" && -n "$IMAGE" ]] && _warn "--task t2v: ignoring --image ($IMAGE)"
+
 # Per-run download base: <out_without_ext>; default ./wan_<task>_<size>
-TASK=$([[ -n "$IMAGE" ]] && echo i2v || echo t2v)
 OUT_BASE="${OUT:-./wan_${TASK}_${SIZE}}"
 OUT_BASE="${OUT_BASE%.mp4}"
 
@@ -96,12 +112,20 @@ _ok "Server healthy: ${BASE}  | task=${TASK} size=${SIZE} steps=${STEPS} frames=
 req=$(jq -n --arg prompt "$PROMPT" --arg size "$SIZE" \
     --argjson steps "$STEPS" --argjson frames "$FRAMES" --argjson seed "$SEED" \
     '{prompt:$prompt, size:$size, num_inference_steps:$steps, num_frames:$frames, seed:$seed}')
-if [[ -n "$IMAGE" ]]; then
+if [[ "$TASK" == "i2v" ]]; then
     [[ -f "$IMAGE" ]] || { _err "Image not found: $IMAGE"; exit 1; }
-    # input_reference is read by the server directly as a local image_path (the file
-    # must be visible inside the container — /home and /data are bind-mounted).
-    req=$(echo "$req" | jq --arg img "$IMAGE" '. + {input_reference:$img}')
-    _info "i2v input image: ${IMAGE}"
+    # input_reference is read by the server directly as a local image_path INSIDE the
+    # container (CWD=/workspace), so resolve to an absolute path — it must fall under a
+    # bind-mounted dir (/home or /data) to be visible in the container. The server also
+    # auto-detects i2v from the model's model_index.json and rejects requests without an
+    # image, so an -I2V- server is required.
+    IMAGE_ABS=$(realpath "$IMAGE")
+    case "$IMAGE_ABS" in
+        /home/*|/data/*) ;;
+        *) _warn "image ${IMAGE_ABS} is not under /home or /data — the container may not see it" ;;
+    esac
+    req=$(echo "$req" | jq --arg img "$IMAGE_ABS" '. + {input_reference:$img}')
+    _info "i2v input image: ${IMAGE_ABS}"
 fi
 [[ -n "$NEGATIVE" ]] && req=$(echo "$req" | jq --arg n "$NEGATIVE" '. + {negative_prompt:$n}')
 
