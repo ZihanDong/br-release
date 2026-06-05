@@ -19,6 +19,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Bypass any localhost HTTP proxy (this node sets http_proxy=127.0.0.1:7890, which
 # turns curl to 127.0.0.1:<port> into 502s). Make localhost direct for all curls.
 export no_proxy="127.0.0.1,localhost,::1${no_proxy:+,$no_proxy}"
@@ -32,8 +34,9 @@ STEPS=4
 FRAMES=81
 SEED=1024
 RUNS=1
-TASK=""          # t2v | i2v ; if empty, inferred from --image
+TASK=""              # t2v | i2v ; if empty, inferred from --image
 IMAGE=""
+IMAGE_RESIZE="cover" # i2v: resize first frame to --size (cover|contain|off)
 NEGATIVE=""
 OUT=""
 POLL_TIMEOUT=3600   # seconds per run
@@ -59,6 +62,9 @@ Usage: $0 [options]
   --task <t2v|i2v>  Task type (default: i2v if --image given, else t2v).
                     i2v requires --image; the server must be an -I2V- model.
   --image <path>    First-frame image path for i2v (required for --task i2v)
+  --image-resize <m> i2v: resize first frame to --size, keeping ratio, so the
+                    output matches it (cover=fill+crop, contain=fit+pad, off).
+                    Default: cover. (i2v output dims follow the INPUT image ratio.)
   --negative <txt>  Negative prompt (optional; model has a default)
   --out <file>      Base download path; runs save to <out_without_ext>_run<N>.mp4
   --timeout <sec>   Max seconds to poll per run (default 3600)
@@ -76,8 +82,9 @@ while [[ $# -gt 0 ]]; do
         --frames)   FRAMES="$2"; shift 2 ;;
         --seed)     SEED="$2"; shift 2 ;;
         --runs)     RUNS="$2"; shift 2 ;;
-        --task)     TASK="$2"; shift 2 ;;
-        --image)    IMAGE="$2"; shift 2 ;;
+        --task)         TASK="$2"; shift 2 ;;
+        --image)        IMAGE="$2"; shift 2 ;;
+        --image-resize) IMAGE_RESIZE="$2"; shift 2 ;;
         --negative) NEGATIVE="$2"; shift 2 ;;
         --out)      OUT="$2"; shift 2 ;;
         --timeout)  POLL_TIMEOUT="$2"; shift 2 ;;
@@ -114,6 +121,19 @@ req=$(jq -n --arg prompt "$PROMPT" --arg size "$SIZE" \
     '{prompt:$prompt, size:$size, num_inference_steps:$steps, num_frames:$frames, seed:$seed}')
 if [[ "$TASK" == "i2v" ]]; then
     [[ -f "$IMAGE" ]] || { _err "Image not found: $IMAGE"; exit 1; }
+    # i2v output dims follow the INPUT image's aspect ratio (scaled to ~max_area),
+    # NOT the request's `size`. So resize the first frame to exactly --size (keeping
+    # ratio) to make the output match. Writes a sized copy next to --out (under the
+    # mounted dir) so the container can read it. Disable with --image-resize off.
+    if [[ "$IMAGE_RESIZE" != "off" ]]; then
+        _resized="${OUT_BASE}_input_${SIZE}.jpg"
+        if python3 "${SCRIPT_DIR}/make_i2v_image.py" --src "$IMAGE" --size "$SIZE" \
+                --mode "$IMAGE_RESIZE" --out "$_resized" >&2; then
+            IMAGE="$_resized"
+        else
+            _warn "image resize failed (need Pillow?); using original — output may not match ${SIZE}"
+        fi
+    fi
     # input_reference is read by the server directly as a local image_path INSIDE the
     # container (CWD=/workspace), so resolve to an absolute path — it must fall under a
     # bind-mounted dir (/home or /data) to be visible in the container. The server also
